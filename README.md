@@ -1,7 +1,7 @@
 # getsecrevo/sdk-python
 
-`sdk-python` is the Python SDK for the **secrevo** product. It is a Cat C
-product-code repository.
+`sdk-python` is the Python SDK for the **secrevo** product. It is a Cat D
+consumption-surface repository.
 
 ## Purpose
 
@@ -103,4 +103,3 @@ source.
 - API contract: [api/docs/contract.md](../api/docs/contract.md)
 - API OpenAPI: [api/docs/openapi.yaml](../api/docs/openapi.yaml)
 - Infrastructure: <https://github.com/getsecrevo/infrastructure>
-
