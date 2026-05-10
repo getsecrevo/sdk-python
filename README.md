@@ -1,105 +1,105 @@
-# getsecrevo/sdk-python
+# secrevo-sdk
 
-`sdk-python` is the Python SDK for the **secrevo** product. It is a Cat D
-consumption-surface repository.
+The official Python SDK for [Secrevo](https://secrevo.com). Pull secrets from
+your Secrevo workspace and hand them to OpenAI, Anthropic, Stripe, AWS, or
+GitHub without ever materializing them in your code.
 
-## Purpose
+## Install
 
-This repository provides the Python client library for Secrevo. It gives
-Python code a small, explicit, and testable way to talk to the Secrevo API,
-resolve secrets by name, normalize secret access modes, and prepare
-agent-facing secret access flows without hand-writing HTTP logic in every
-consumer.
+    pip install secrevo-sdk
 
-The SDK is intentionally narrow. It follows the current API contract and keeps
-authentication explicit instead of hiding it behind global state.
+If you want a specific integration installed alongside the SDK, install one of
+the extras:
 
-## Stack
+    pip install "secrevo-sdk[openai]"
+    pip install "secrevo-sdk[anthropic]"
+    pip install "secrevo-sdk[stripe]"
+    pip install "secrevo-sdk[aws]"
+    pip install "secrevo-sdk[github]"
+    pip install "secrevo-sdk[all]"
 
-- Python 3.12+
-- httpx for HTTP transport and request construction
-- pytest for tests
-- setuptools for packaging
+The integrations are imported lazily, so the base install only depends on
+`httpx`.
 
-## Architecture role
+## 30-second example
 
-This repo sits on the client side of Secrevo. It does not host secrets and it
-does not talk to OpenBao directly. Instead, it consumes the Secrevo API over
-HTTP and turns the documented secret and agent flows into a Pythonic library.
+    from secrevo_sdk import SecrevoClient
 
-The package currently focuses on:
+    with SecrevoClient(
+        base_url="https://api.secrevo.com",
+        workspace_id="workspace-...",
+        token="agt_...",
+    ) as secrevo:
+        openai = secrevo.openai_for("OPENAI_API_KEY")
+        result = openai.responses.create(
+            model="gpt-5",
+            input="What is the capital of France?",
+        )
+        print(result.output_text)
 
-- resolving secret metadata by name
-- returning a normalized secret view for direct use, contextual use, or
-  agent use
-- preparing a lightweight OpenAI wrapper stub for the secret flow that will
-  matter in phase 03
+The OpenAI client is the canonical `openai.OpenAI` object. The same pattern
+works for Anthropic (`anthropic_for`), Stripe (`stripe_for`), AWS
+(`aws_session_for`) and GitHub (`github_for`). Every reveal goes through
+the API and lands as a `secret.value.read` audit event in the workspace.
 
-## Primary consumers
+## Reveal a value directly
 
-- Python automation jobs that need to resolve Secrevo secrets
-- agent-side integration code that will call Secrevo from Python
-- CLI helpers and notebooks that want a thin client instead of raw HTTP calls
-- future product services that need a reusable Secrevo client
+    revealed = secrevo.reveal_value("OPENAI_API_KEY")
+    print(revealed.value)         # plaintext secret — handle with care
+    print(revealed.secret.name)   # metadata is preserved alongside
 
-## API / contract
+`reveal_value` is the lowest-level API: every integration helper is built on
+top of it. Treat the returned `value` as sensitive — pass it directly to
+the consumer and let it go out of scope.
 
-This SDK consumes the Secrevo API contract documented in:
+## Errors you actually want to handle
 
-- [API contract](../api/docs/contract.md)
-- [OpenAPI](../api/docs/openapi.yaml)
+The SDK distinguishes the failure modes that matter:
 
-The current client implementation uses:
+| Exception                       | When                                                   |
+| ------------------------------- | ------------------------------------------------------ |
+| `SecretNotFoundError`           | Name doesn't resolve. The list of names that *do* live in this workspace is attached so you can spot typos. |
+| `AgentRevokedError`             | The agent token was paused or revoked. Mint a new one. |
+| `RateLimitedError`              | Hit a 429. `retry_after_seconds` is parsed from the response. |
+| `IntegrationNotInstalledError`  | You called `openai_for(...)` but `openai` isn't installed. The error names the exact `pip install` line. |
+| `SecrevoAPIError`               | Catch-all for everything else; carries the `status_code`. |
 
-- `GET /v1/workspaces/{workspaceId}/secrets`
-- `GET /v1/workspaces/{workspaceId}/secrets/{secretId}`
+All of them inherit from `SecrevoError`, so `except SecrevoError:` is a valid
+top-level guard.
 
-The package is aligned with the broader Secrevo surface documented in the API
-contract, including workspace bootstrap, members, agents, grants, access
-requests, and audit trail endpoints.
+## Integration helpers
+
+| Helper                       | Returns                              | Optional extra        |
+| ---------------------------- | ------------------------------------ | --------------------- |
+| `secrevo.openai_for(name)`   | `openai.OpenAI(api_key=...)`         | `secrevo-sdk[openai]` |
+| `secrevo.anthropic_for(name)`| `anthropic.Anthropic(api_key=...)`   | `secrevo-sdk[anthropic]` |
+| `secrevo.stripe_for(name)`   | `stripe` module with `api_key` set   | `secrevo-sdk[stripe]` |
+| `secrevo.aws_session_for(...)` | `boto3.Session(...)`               | `secrevo-sdk[aws]`    |
+| `secrevo.github_for(name)`   | `github.Github(auth=Auth.Token(...))` | `secrevo-sdk[github]` |
+
+`aws_session_for` takes the names of two (or three) secrets:
+
+    session = secrevo.aws_session_for(
+        access_key_secret="AWS_ACCESS_KEY_ID",
+        secret_key_secret="AWS_SECRET_ACCESS_KEY",
+        region_name="us-east-1",
+    )
+    s3 = session.client("s3")
 
 ## Local development
 
-```bash
-python -m venv .venv
-.venv\\Scripts\\activate
-pip install -e ".[test]"
-pytest
-```
+    python -m venv .venv
+    source .venv/bin/activate     # Windows: .venv\Scripts\activate
+    pip install -e ".[test]"
+    pytest
 
-If you want to run against Python 3.12 explicitly, use a 3.12 interpreter or a
-container image that provides it.
-
-## Tests
-
-The test suite uses pytest and mocked HTTP transports. It covers:
-
-- secret access mode normalization
-- request construction and auth header handling
-- secret lookup by name through the Secrevo API contract
-- contextual and agent-facing secret views
-- the OpenAI wrapper stub behavior
-
-Run the tests with:
-
-```bash
-pytest
-```
-
-## Deployment
-
-This repository does not run as a service. It is packaged as a versioned Python
-library and consumed by Python applications, agent tooling, and automation
-jobs.
-
-Planned delivery is a wheel/sdist published from CI once phase 03 is wired into
-the product pipeline. Until then, the repo is meant to be installed from
-source.
+The tests use `httpx.MockTransport`, so no network or real Secrevo account is
+required.
 
 ## Cross-references
 
-- Governance: <https://github.com/getGanemo/docs-company/blob/main/governance/product-structure.md>
-- Product project_management: <https://github.com/getsecrevo/project_management>
-- API contract: [api/docs/contract.md](../api/docs/contract.md)
-- API OpenAPI: [api/docs/openapi.yaml](../api/docs/openapi.yaml)
+- Product website: <https://secrevo.com>
+- Status page: <https://secrevo.com/status>
+- Privacy / Terms / DPA: <https://secrevo.com/privacy>, <https://secrevo.com/terms>, <https://secrevo.com/dpa>
+- API repo: <https://github.com/getsecrevo/api>
 - Infrastructure: <https://github.com/getsecrevo/infrastructure>

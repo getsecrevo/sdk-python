@@ -1,14 +1,24 @@
 from .client import SecrevoClient, normalize_access_mode
-from .exceptions import SecrevoError, SecretNotFoundError
-from .models import OpenAISecretStub, SecretAccess, SecretRecord
+from .exceptions import (
+    AgentRevokedError,
+    IntegrationNotInstalledError,
+    RateLimitedError,
+    SecretNotFoundError,
+    SecrevoAPIError,
+    SecrevoError,
+)
+from .models import SecretAccess, SecretRecord, SecretValue
 
 __all__ = [
-    "OpenAISecretStub",
+    "AgentRevokedError",
+    "IntegrationNotInstalledError",
+    "RateLimitedError",
     "SecretAccess",
-    "SecretRecord",
     "SecretNotFoundError",
+    "SecretRecord",
+    "SecretValue",
+    "SecrevoAPIError",
     "SecrevoClient",
     "SecrevoError",
     "normalize_access_mode",
 ]
-
