@@ -4,18 +4,47 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "secrevo-sdk"
-version = "0.1.0"
-description = "Python SDK for Secrevo."
+version = "0.2.0"
+description = "Python SDK for Secrevo — pull secrets from your Secrevo workspace and hand them to OpenAI, Anthropic, Stripe, AWS, or GitHub without ever materializing them in your code."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
   "httpx>=0.27,<1",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+  "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
 [project.optional-dependencies]
 test = [
   "pytest>=8",
 ]
+openai = ["openai>=1.0"]
+anthropic = ["anthropic>=0.30"]
+stripe = ["stripe>=8"]
+aws = ["boto3>=1.34"]
+github = ["PyGithub>=2.1"]
+all = [
+  "openai>=1.0",
+  "anthropic>=0.30",
+  "stripe>=8",
+  "boto3>=1.34",
+  "PyGithub>=2.1",
+]
+
+[project.urls]
+Homepage = "https://secrevo.com"
+Documentation = "https://github.com/getsecrevo/sdk-python"
+Source = "https://github.com/getsecrevo/sdk-python"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -26,4 +55,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-

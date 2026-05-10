@@ -20,13 +20,32 @@ class SecretRecord:
             workspace_id=_require_text(payload, "workspace_id"),
             secret_id=_require_text(payload, "secret_id"),
             name=_require_text(payload, "name"),
-            description=_require_text(payload, "description"),
-            regeneration_instructions=_require_text(
+            description=_optional_text(payload, "description"),
+            regeneration_instructions=_optional_text(
                 payload, "regeneration_instructions"
             ),
             status=_require_text(payload, "status"),
             updated_at=_require_text(payload, "updated_at"),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SecretValue:
+    """The plaintext value of a secret, paired with its metadata.
+
+    Returned by :meth:`SecrevoClient.reveal_value`. Treat ``value`` as
+    sensitive: it is the raw credential. Avoid printing it, logging it,
+    or storing it on disk.
+    """
+
+    secret: SecretRecord
+    value: str
+
+    @classmethod
+    def from_payload(
+        cls, secret: SecretRecord, payload: Mapping[str, Any]
+    ) -> "SecretValue":
+        return cls(secret=secret, value=_require_text(payload, "value"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,22 +55,17 @@ class SecretAccess:
     context: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True, slots=True)
-class OpenAISecretStub:
-    secret: SecretRecord
-    access_mode: str = "for_agent"
-    provider: str = "openai"
-
-    def as_client_kwargs(self) -> dict[str, Any]:
-        raise NotImplementedError(
-            "Secrevo does not yet expose secret value material in the current API "
-            "contract, so the OpenAI wrapper is a stub."
-        )
-
-
 def _require_text(payload: Mapping[str, Any], field_name: str) -> str:
     value = payload.get(field_name)
     if not isinstance(value, str) or not value:
         raise ValueError(f"payload field '{field_name}' must be a non-empty string")
     return value
 
+
+def _optional_text(payload: Mapping[str, Any], field_name: str) -> str:
+    value = payload.get(field_name)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"payload field '{field_name}' must be a string when present")
+    return value

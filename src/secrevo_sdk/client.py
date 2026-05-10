@@ -1,11 +1,18 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+import time
+from typing import Any
 
 import httpx
 
-from .exceptions import SecrevoAPIError, SecretNotFoundError
-from .models import OpenAISecretStub, SecretAccess, SecretRecord
+from . import integrations
+from .exceptions import (
+    AgentRevokedError,
+    RateLimitedError,
+    SecretNotFoundError,
+    SecrevoAPIError,
+)
+from .models import SecretAccess, SecretRecord, SecretValue
 
 _ACCESS_MODE_ALIASES = {
     "": "standard",
@@ -31,6 +38,30 @@ def normalize_access_mode(value: str | None) -> str:
 
 
 class SecrevoClient:
+    """HTTP client for the Secrevo API.
+
+    The minimum signal you need to pass is ``base_url``, ``workspace_id``
+    and ``token``. Everything else has sensible defaults. The client
+    maintains an internal cache of the secret name → id mapping so
+    name-based lookups don't pay a list round-trip every call.
+
+    Example::
+
+        from secrevo_sdk import SecrevoClient
+
+        with SecrevoClient(
+            base_url="https://api.secrevo.com",
+            workspace_id="workspace-…",
+            token="agt_…",
+        ) as secrevo:
+            openai = secrevo.openai_for("OPENAI_API_KEY")
+            result = openai.responses.create(
+                model="gpt-5",
+                input="What is the capital of France?",
+            )
+            print(result.output_text)
+    """
+
     def __init__(
         self,
         *,
@@ -50,6 +81,7 @@ class SecrevoClient:
             timeout=timeout,
             transport=transport,
         )
+        self._secret_index: dict[str, SecretRecord] | None = None
 
     def close(self) -> None:
         self._client.close()
@@ -64,14 +96,26 @@ class SecrevoClient:
     def workspace_id(self) -> str:
         return self._workspace_id
 
-    def list_secrets(self) -> list[SecretRecord]:
+    # --- Listing & metadata --------------------------------------------------
+
+    def list_secrets(self, *, refresh: bool = False) -> list[SecretRecord]:
+        """Return every secret visible to this token.
+
+        The result is cached on the instance; pass ``refresh=True`` to
+        force a re-fetch (e.g. after an admin granted you a new secret
+        in another tab).
+        """
+        if not refresh and self._secret_index is not None:
+            return list(self._secret_index.values())
         payload = self._request_json(
             "GET", f"/v1/workspaces/{self._workspace_id}/secrets"
         )
         secrets = payload.get("secrets")
         if not isinstance(secrets, list):
             raise SecrevoAPIError("invalid secrets payload: expected a secrets list")
-        return [SecretRecord.from_payload(item) for item in secrets]
+        records = [SecretRecord.from_payload(item) for item in secrets]
+        self._secret_index = {record.name: record for record in records}
+        return records
 
     def get(self, secret_name: str) -> SecretRecord:
         secret = self._resolve_secret_by_name(secret_name)
@@ -97,16 +141,80 @@ class SecrevoClient:
             context=_context_payload(self._workspace_id, secret, "for_agent"),
         )
 
-    def openai_for(self, secret_name: str) -> OpenAISecretStub:
-        return OpenAISecretStub(secret=self.get(secret_name))
+    # --- Reveal --------------------------------------------------------------
+
+    def reveal_value(self, secret_name: str) -> SecretValue:
+        """Reveal the plaintext value of a secret.
+
+        The returned object holds both the metadata and the value. The
+        value is sensitive — do not log it or persist it; pass it
+        directly to the consumer (e.g. an API client) and let it go out
+        of scope.
+
+        On the wire this hits ``GET /v1/workspaces/{ws}/secrets/{id}/value``,
+        which the API records as a ``secret.value.read`` audit event so
+        the workspace owner sees who accessed what.
+        """
+        secret = self._resolve_secret_by_name(secret_name)
+        payload = self._request_json(
+            "GET",
+            f"/v1/workspaces/{self._workspace_id}/secrets/{secret.secret_id}/value",
+        )
+        return SecretValue.from_payload(secret, payload)
+
+    # --- Integrations --------------------------------------------------------
+
+    def openai_for(self, secret_name: str, **kwargs: Any) -> Any:
+        """Return an ``openai.OpenAI`` client keyed on ``secret_name``."""
+        return integrations.openai_for(self, secret_name, **kwargs)
+
+    def anthropic_for(self, secret_name: str, **kwargs: Any) -> Any:
+        """Return an ``anthropic.Anthropic`` client keyed on ``secret_name``."""
+        return integrations.anthropic_for(self, secret_name, **kwargs)
+
+    def stripe_for(self, secret_name: str) -> Any:
+        """Return the ``stripe`` module with ``api_key`` set to the secret."""
+        return integrations.stripe_for(self, secret_name)
+
+    def aws_session_for(
+        self,
+        *,
+        access_key_secret: str,
+        secret_key_secret: str,
+        session_token_secret: str | None = None,
+        region_name: str | None = None,
+        profile_name: str | None = None,
+    ) -> Any:
+        """Return a ``boto3.Session`` whose credentials come from Secrevo."""
+        return integrations.aws_session_for(
+            self,
+            access_key_secret=access_key_secret,
+            secret_key_secret=secret_key_secret,
+            session_token_secret=session_token_secret,
+            region_name=region_name,
+            profile_name=profile_name,
+        )
+
+    def github_for(self, secret_name: str, **kwargs: Any) -> Any:
+        """Return a ``github.Github`` client authed with the secret."""
+        return integrations.github_for(self, secret_name, **kwargs)
+
+    # --- Internals -----------------------------------------------------------
 
     def _resolve_secret_by_name(self, secret_name: str) -> SecretRecord:
         normalized_name = _require_text(secret_name, "secret_name")
         for secret in self.list_secrets():
             if secret.name == normalized_name:
                 return secret
+        # Refresh once in case the cache predates a recent grant.
+        for secret in self.list_secrets(refresh=True):
+            if secret.name == normalized_name:
+                return secret
+        available = sorted(secret.name for secret in self.list_secrets())
         raise SecretNotFoundError(
-            f"secret {normalized_name!r} was not found in workspace {self._workspace_id!r}"
+            normalized_name,
+            workspace_id=self._workspace_id,
+            available=available,
         )
 
     def _request_json(self, method: str, path: str) -> dict[str, Any]:
@@ -118,7 +226,25 @@ class SecrevoClient:
                     f"invalid response payload for {method} {path}: expected object"
                 )
             return payload
-        raise SecrevoAPIError(self._format_error(response, method, path))
+        if response.status_code == 401 or response.status_code == 403:
+            error_body = (response.text or "").lower()
+            if "agent" in error_body and ("revoked" in error_body or "paused" in error_body):
+                raise AgentRevokedError(
+                    "the agent token used by the SDK has been paused or revoked. "
+                    "Ask the workspace owner to mint a new token."
+                )
+        if response.status_code == 429:
+            retry_after = _parse_retry_after(response.headers.get("retry-after"))
+            raise RateLimitedError(
+                f"rate limited by the Secrevo API on {method} {path}; "
+                f"retry after ~{retry_after:.0f}s",
+                status_code=429,
+                retry_after_seconds=retry_after,
+            )
+        raise SecrevoAPIError(
+            self._format_error(response, method, path),
+            status_code=response.status_code,
+        )
 
     @staticmethod
     def _format_error(response: httpx.Response, method: str, path: str) -> str:
@@ -142,3 +268,23 @@ def _require_text(value: str, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string")
     return value.strip()
+
+
+def _parse_retry_after(raw: str | None) -> float:
+    """Parse a Retry-After header per RFC 7231 — either delta-seconds or
+    an HTTP-date. Falls back to 1.0 second if the value is missing or
+    unparseable.
+    """
+    if not raw:
+        return 1.0
+    raw = raw.strip()
+    if raw.isdigit():
+        return float(raw)
+    try:
+        # HTTP-date case (rare)
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(raw)
+        delta = dt.timestamp() - time.time()
+        return max(delta, 1.0)
+    except Exception:
+        return 1.0

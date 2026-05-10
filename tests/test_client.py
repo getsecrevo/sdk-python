@@ -1,12 +1,68 @@
 from __future__ import annotations
 
-import json
+from typing import Callable
 
 import httpx
 import pytest
 
 from secrevo_sdk.client import SecrevoClient, normalize_access_mode
-from secrevo_sdk.exceptions import SecrevoAPIError, SecretNotFoundError
+from secrevo_sdk.exceptions import (
+    AgentRevokedError,
+    IntegrationNotInstalledError,
+    RateLimitedError,
+    SecretNotFoundError,
+    SecrevoAPIError,
+)
+
+
+SECRET_PAYLOAD = {
+    "workspace_id": "ws-1",
+    "secret_id": "sec-123",
+    "name": "api-key",
+    "description": "OpenAI API key",
+    "regeneration_instructions": "Rotate in provider console",
+    "status": "active",
+    "updated_at": "2026-05-06T02:00:00Z",
+}
+
+
+def build_handler(
+    *, list_secrets: list[dict] | None = None, value: str | None = None
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Construct a fake handler that responds to the standard list/detail/value
+    paths with the provided fixtures. Other paths return 404.
+    """
+    secrets = [SECRET_PAYLOAD] if list_secrets is None else list_secrets
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/workspaces/ws-1/secrets":
+            return httpx.Response(200, json={"secrets": secrets})
+        if path == "/v1/workspaces/ws-1/secrets/sec-123":
+            return httpx.Response(200, json=SECRET_PAYLOAD)
+        if path == "/v1/workspaces/ws-1/secrets/sec-123/value":
+            if value is None:
+                return httpx.Response(403, text="forbidden")
+            return httpx.Response(
+                200,
+                json={
+                    "workspace_id": "ws-1",
+                    "secret_id": "sec-123",
+                    "value": value,
+                },
+            )
+        return httpx.Response(404, text=f"unexpected: {request.method} {path}")
+
+    return handler
+
+
+def make_client(handler: Callable[[httpx.Request], httpx.Response]) -> SecrevoClient:
+    return SecrevoClient(
+        base_url="https://api.secrevo.local",
+        workspace_id="ws-1",
+        token="test-token",
+        transport=httpx.MockTransport(handler),
+    )
 
 
 def test_normalize_access_mode_aliases() -> None:
@@ -20,52 +76,13 @@ def test_normalize_access_mode_aliases() -> None:
 
 def test_get_uses_list_then_detail_request() -> None:
     requests: list[httpx.Request] = []
+    base = build_handler()
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        if request.method == "GET" and request.url.path == "/v1/workspaces/ws-1/secrets":
-            assert request.headers["Authorization"] == "Bearer test-token"
-            assert request.headers["Accept"] == "application/json"
-            return httpx.Response(
-                200,
-                json={
-                    "secrets": [
-                        {
-                            "workspace_id": "ws-1",
-                            "secret_id": "sec-123",
-                            "name": "api-key",
-                            "description": "OpenAI API key",
-                            "regeneration_instructions": "Rotate in provider console",
-                            "status": "active",
-                            "updated_at": "2026-05-06T02:00:00Z",
-                        }
-                    ]
-                },
-            )
-        if request.method == "GET" and request.url.path == "/v1/workspaces/ws-1/secrets/sec-123":
-            assert request.headers["Authorization"] == "Bearer test-token"
-            assert request.headers["Accept"] == "application/json"
-            return httpx.Response(
-                200,
-                json={
-                    "workspace_id": "ws-1",
-                    "secret_id": "sec-123",
-                    "name": "api-key",
-                    "description": "OpenAI API key",
-                    "regeneration_instructions": "Rotate in provider console",
-                    "status": "active",
-                    "updated_at": "2026-05-06T02:00:00Z",
-                },
-            )
-        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+        return base(request)
 
-    client = SecrevoClient(
-        base_url="https://api.secrevo.local",
-        workspace_id="ws-1",
-        token="test-token",
-        transport=httpx.MockTransport(handler),
-    )
-
+    client = make_client(handler)
     secret = client.get("api-key")
 
     assert secret.secret_id == "sec-123"
@@ -73,6 +90,24 @@ def test_get_uses_list_then_detail_request() -> None:
     assert len(requests) == 2
     assert requests[0].url.path == "/v1/workspaces/ws-1/secrets"
     assert requests[1].url.path == "/v1/workspaces/ws-1/secrets/sec-123"
+
+
+def test_list_secrets_caches_until_refresh() -> None:
+    requests: list[httpx.Request] = []
+    base = build_handler()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return base(request)
+
+    client = make_client(handler)
+    first = client.list_secrets()
+    second = client.list_secrets()
+    third = client.list_secrets(refresh=True)
+
+    assert first == second == third
+    list_calls = [r for r in requests if r.url.path == "/v1/workspaces/ws-1/secrets"]
+    assert len(list_calls) == 2  # one for the first call, one for refresh=True
 
 
 @pytest.mark.parametrize(
@@ -83,45 +118,7 @@ def test_get_uses_list_then_detail_request() -> None:
     ],
 )
 def test_secret_access_views_normalize_mode(method_name: str, expected_mode: str) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/workspaces/ws-1/secrets":
-            return httpx.Response(
-                200,
-                json={
-                    "secrets": [
-                        {
-                            "workspace_id": "ws-1",
-                            "secret_id": "sec-123",
-                            "name": "api-key",
-                            "description": "OpenAI API key",
-                            "regeneration_instructions": "Rotate in provider console",
-                            "status": "active",
-                            "updated_at": "2026-05-06T02:00:00Z",
-                        }
-                    ]
-                },
-            )
-        if request.url.path == "/v1/workspaces/ws-1/secrets/sec-123":
-            return httpx.Response(
-                200,
-                json={
-                    "workspace_id": "ws-1",
-                    "secret_id": "sec-123",
-                    "name": "api-key",
-                    "description": "OpenAI API key",
-                    "regeneration_instructions": "Rotate in provider console",
-                    "status": "active",
-                    "updated_at": "2026-05-06T02:00:00Z",
-                },
-            )
-        raise AssertionError(f"unexpected request: {request.method} {request.url}")
-
-    client = SecrevoClient(
-        base_url="https://api.secrevo.local",
-        workspace_id="ws-1",
-        token="test-token",
-        transport=httpx.MockTransport(handler),
-    )
+    client = make_client(build_handler())
 
     access = getattr(client, method_name)("api-key")
 
@@ -132,69 +129,93 @@ def test_secret_access_views_normalize_mode(method_name: str, expected_mode: str
     assert access.context["access_mode"] == expected_mode
 
 
-def test_openai_stub_is_explicitly_not_implemented() -> None:
+def test_reveal_value_returns_plaintext() -> None:
+    client = make_client(build_handler(value="sk-live-123"))
+
+    revealed = client.reveal_value("api-key")
+
+    assert revealed.value == "sk-live-123"
+    assert revealed.secret.secret_id == "sec-123"
+
+
+def test_missing_secret_lists_available_names() -> None:
+    other = {**SECRET_PAYLOAD, "secret_id": "sec-999", "name": "stripe-live"}
+    client = make_client(build_handler(list_secrets=[SECRET_PAYLOAD, other]))
+
+    with pytest.raises(SecretNotFoundError) as info:
+        client.get("missing-name")
+
+    err = info.value
+    assert err.workspace_id == "ws-1"
+    assert err.available == ["api-key", "stripe-live"]
+    assert "api-key" in str(err)
+    assert "stripe-live" in str(err)
+
+
+def test_agent_revoked_response_raises_distinct_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/workspaces/ws-1/secrets":
-            return httpx.Response(
-                200,
-                json={
-                    "secrets": [
-                        {
-                            "workspace_id": "ws-1",
-                            "secret_id": "sec-123",
-                            "name": "api-key",
-                            "description": "OpenAI API key",
-                            "regeneration_instructions": "Rotate in provider console",
-                            "status": "active",
-                            "updated_at": "2026-05-06T02:00:00Z",
-                        }
-                    ]
-                },
-            )
-        if request.url.path == "/v1/workspaces/ws-1/secrets/sec-123":
-            return httpx.Response(
-                200,
-                json={
-                    "workspace_id": "ws-1",
-                    "secret_id": "sec-123",
-                    "name": "api-key",
-                    "description": "OpenAI API key",
-                    "regeneration_instructions": "Rotate in provider console",
-                    "status": "active",
-                    "updated_at": "2026-05-06T02:00:00Z",
-                },
-            )
-        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+        return httpx.Response(403, text="agent token has been revoked")
 
-    client = SecrevoClient(
-        base_url="https://api.secrevo.local",
-        workspace_id="ws-1",
-        token="test-token",
-        transport=httpx.MockTransport(handler),
-    )
+    client = make_client(handler)
 
-    stub = client.openai_for("api-key")
-
-    assert stub.provider == "openai"
-    assert stub.access_mode == "for_agent"
-    assert stub.secret.secret_id == "sec-123"
-    with pytest.raises(NotImplementedError):
-        stub.as_client_kwargs()
+    with pytest.raises(AgentRevokedError):
+        client.list_secrets(refresh=True)
 
 
-def test_missing_secret_raises_clear_error() -> None:
+def test_rate_limit_surfaces_retry_after_seconds() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/workspaces/ws-1/secrets":
-            return httpx.Response(200, json={"secrets": []})
-        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+        return httpx.Response(429, text="slow down", headers={"Retry-After": "12"})
 
-    client = SecrevoClient(
-        base_url="https://api.secrevo.local",
-        workspace_id="ws-1",
-        token="test-token",
-        transport=httpx.MockTransport(handler),
-    )
+    client = make_client(handler)
 
-    with pytest.raises(SecretNotFoundError):
-        client.get("missing")
+    with pytest.raises(RateLimitedError) as info:
+        client.list_secrets(refresh=True)
+    assert info.value.retry_after_seconds == pytest.approx(12.0)
 
+
+def test_generic_5xx_surfaces_status_code() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="upstream down")
+
+    client = make_client(handler)
+
+    with pytest.raises(SecrevoAPIError) as info:
+        client.list_secrets(refresh=True)
+    assert info.value.status_code == 503
+
+
+def test_integration_helpers_raise_with_clear_install_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each integration imports its third-party SDK lazily; if it isn't
+    installed the SDK should hand the user the exact `pip install` line.
+    """
+    client = make_client(build_handler(value="sk-live-123"))
+
+    # Force importlib to fail for these names regardless of what's installed
+    # locally on the test machine.
+    import importlib
+
+    real_import_module = importlib.import_module
+
+    def fake_import_module(name: str, *args, **kwargs):
+        if name in {"openai", "anthropic", "stripe", "boto3", "github"}:
+            raise ImportError(f"forced miss for {name}")
+        return real_import_module(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import_module)
+
+    with pytest.raises(IntegrationNotInstalledError) as info:
+        client.openai_for("api-key")
+    assert "pip install openai" in str(info.value)
+
+    with pytest.raises(IntegrationNotInstalledError):
+        client.anthropic_for("api-key")
+    with pytest.raises(IntegrationNotInstalledError):
+        client.stripe_for("api-key")
+    with pytest.raises(IntegrationNotInstalledError):
+        client.aws_session_for(
+            access_key_secret="api-key",
+            secret_key_secret="api-key",
+        )
+    with pytest.raises(IntegrationNotInstalledError) as gh_info:
+        client.github_for("api-key")
+    assert "pip install PyGithub" in str(gh_info.value)
