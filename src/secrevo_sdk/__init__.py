@@ -1,3 +1,6 @@
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
 from .async_client import AsyncSecrevoClient
 from .client import (
     ENV_BASE_URL,
@@ -16,6 +19,14 @@ from .exceptions import (
 )
 from .models import SecretAccess, SecretRecord, SecretValue
 
+try:
+    __version__ = _pkg_version("secrevo-sdk")
+except PackageNotFoundError:
+    # Editable install before metadata is registered (rare) or a source
+    # tree imported without being installed. Pin a sentinel so callers
+    # that read __version__ for telemetry still get a string.
+    __version__ = "0.0.0+local"
+
 __all__ = [
     "AgentRevokedError",
     "AsyncSecrevoClient",
@@ -31,5 +42,6 @@ __all__ = [
     "SecrevoAPIError",
     "SecrevoClient",
     "SecrevoError",
+    "__version__",
     "normalize_access_mode",
 ]
