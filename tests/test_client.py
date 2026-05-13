@@ -200,11 +200,119 @@ def test_rate_limit_surfaces_retry_after_seconds() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, text="slow down", headers={"Retry-After": "12"})
 
-    client = make_client(handler)
+    # Disable retries so the 429 surfaces immediately.
+    client = SecrevoClient(
+        base_url="https://api.secrevo.local",
+        workspace_id="ws-1",
+        token="test-token",
+        transport=httpx.MockTransport(handler),
+        max_retries=0,
+    )
 
     with pytest.raises(RateLimitedError) as info:
         client.list_secrets(refresh=True)
     assert info.value.retry_after_seconds == pytest.approx(12.0)
+
+
+def test_retry_succeeds_after_transient_5xx() -> None:
+    """A 503 once, then 200 should yield a successful list without raising."""
+    responses = iter(
+        [
+            httpx.Response(503, text="upstream down"),
+            httpx.Response(200, json={"secrets": [SECRET_PAYLOAD]}),
+        ]
+    )
+    sleep_calls: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return next(responses)
+
+    client = SecrevoClient(
+        base_url="https://api.secrevo.local",
+        workspace_id="ws-1",
+        token="test-token",
+        transport=httpx.MockTransport(handler),
+        max_retries=2,
+        sleep=sleep_calls.append,
+    )
+
+    result = client.list_secrets(refresh=True)
+    assert len(result) == 1
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] >= 0
+
+
+def test_retry_honors_retry_after_on_429() -> None:
+    """The first 429 should sleep for the Retry-After value, not exponential backoff."""
+    responses = iter(
+        [
+            httpx.Response(429, text="slow down", headers={"Retry-After": "7"}),
+            httpx.Response(200, json={"secrets": [SECRET_PAYLOAD]}),
+        ]
+    )
+    sleep_calls: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return next(responses)
+
+    client = SecrevoClient(
+        base_url="https://api.secrevo.local",
+        workspace_id="ws-1",
+        token="test-token",
+        transport=httpx.MockTransport(handler),
+        max_retries=2,
+        retry_backoff_max=30.0,
+        sleep=sleep_calls.append,
+    )
+
+    client.list_secrets(refresh=True)
+    assert sleep_calls == [pytest.approx(7.0)]
+
+
+def test_retry_exhausts_then_raises_for_persistent_5xx() -> None:
+    sleep_calls: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="still down")
+
+    client = SecrevoClient(
+        base_url="https://api.secrevo.local",
+        workspace_id="ws-1",
+        token="test-token",
+        transport=httpx.MockTransport(handler),
+        max_retries=2,
+        sleep=sleep_calls.append,
+    )
+
+    with pytest.raises(SecrevoAPIError) as info:
+        client.list_secrets(refresh=True)
+    assert info.value.status_code == 503
+    assert len(sleep_calls) == 2  # 2 retries, then raise
+
+
+def test_retry_on_transport_error() -> None:
+    """Network errors should be retried like 5xx, not surface as raw exceptions."""
+    attempts = {"n": 0}
+    sleep_calls: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(200, json={"secrets": [SECRET_PAYLOAD]})
+
+    client = SecrevoClient(
+        base_url="https://api.secrevo.local",
+        workspace_id="ws-1",
+        token="test-token",
+        transport=httpx.MockTransport(handler),
+        max_retries=2,
+        sleep=sleep_calls.append,
+    )
+
+    result = client.list_secrets(refresh=True)
+    assert len(result) == 1
+    assert len(sleep_calls) == 1
 
 
 def test_generic_5xx_surfaces_status_code() -> None:
