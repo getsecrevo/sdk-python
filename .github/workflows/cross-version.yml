@@ -1,0 +1,48 @@
+name: cross-version
+
+# Weekly compatibility check across the supported Python versions
+# (3.10-3.13). PRs run only 3.12 to keep the Actions quota in check;
+# this workflow surfaces a regression at most a week late and can be
+# invoked on demand via:
+#     gh workflow run cross-version.yml --repo getsecrevo/sdk-python
+#
+# A failure here is a release blocker — fix on a feature branch and
+# re-run with workflow_dispatch before tagging.
+#
+# publish.yml (release path) also runs the full matrix implicitly by
+# building sdist + wheel that pyproject pins to >=3.10; this workflow
+# is the early-warning channel.
+
+on:
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-python-cross-version-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+      - name: pytest
+        run: pytest -q
