@@ -1,9 +1,13 @@
 name: pr
 
-# Runs on every pull request targeting main, and on push to main. The
-# sdk publishes via publish.yml on version tags; this workflow exists
-# to catch regressions at PR time before they reach main (and before
-# a downstream `pip install secrevo-sdk` user finds them).
+# Runs on every pull request targeting main + push to main. Single
+# Python version on PRs to keep the GitHub Actions quota in check;
+# the full 3.10-3.13 compatibility matrix runs on:
+#   - publish.yml (every release tag, before sdist + wheel upload)
+#   - cross-version.yml (weekly + workflow_dispatch)
+#
+# 3.12 is the canonical PR version: middle of the supported range,
+# fastest install on linux runners.
 
 on:
   pull_request:
@@ -14,23 +18,21 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: sdk-python-pr-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    name: pytest (python ${{ matrix.python-version }})
+    name: pytest (python 3.12)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # Mirrors the classifiers in pyproject.toml. 3.10 is the floor
-        # (requires-python = ">=3.10"); 3.13 is the current latest.
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
           cache: pip
 
       - name: Install
