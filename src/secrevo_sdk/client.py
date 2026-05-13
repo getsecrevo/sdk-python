@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+import random
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -18,6 +19,11 @@ from .models import SecretAccess, SecretRecord, SecretValue
 ENV_BASE_URL = "SECREVO_API_BASE_URL"
 ENV_WORKSPACE_ID = "SECREVO_WORKSPACE_ID"
 ENV_TOKEN = "SECREVO_API_TOKEN"
+
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_BACKOFF_BASE = 0.5
+DEFAULT_RETRY_BACKOFF_MAX = 30.0
+RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
 
 _ACCESS_MODE_ALIASES = {
     "": "standard",
@@ -75,6 +81,10 @@ class SecrevoClient:
         token: str,
         timeout: float | httpx.Timeout = 10.0,
         transport: httpx.BaseTransport | None = None,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_backoff_base: float = DEFAULT_RETRY_BACKOFF_BASE,
+        retry_backoff_max: float = DEFAULT_RETRY_BACKOFF_MAX,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._workspace_id = _require_text(workspace_id, "workspace_id")
         self._client = httpx.Client(
@@ -87,6 +97,12 @@ class SecrevoClient:
             transport=transport,
         )
         self._secret_index: dict[str, SecretRecord] | None = None
+        if max_retries < 0:
+            raise ValueError("max_retries must be >= 0")
+        self._max_retries = max_retries
+        self._retry_backoff_base = retry_backoff_base
+        self._retry_backoff_max = retry_backoff_max
+        self._sleep = sleep
 
     @classmethod
     def from_env(
@@ -94,6 +110,9 @@ class SecrevoClient:
         *,
         timeout: float | httpx.Timeout = 10.0,
         transport: httpx.BaseTransport | None = None,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_backoff_base: float = DEFAULT_RETRY_BACKOFF_BASE,
+        retry_backoff_max: float = DEFAULT_RETRY_BACKOFF_MAX,
     ) -> "SecrevoClient":
         """Construct a client from the standard Secrevo environment variables.
 
@@ -113,6 +132,9 @@ class SecrevoClient:
             token=_require_env(ENV_TOKEN),
             timeout=timeout,
             transport=transport,
+            max_retries=max_retries,
+            retry_backoff_base=retry_backoff_base,
+            retry_backoff_max=retry_backoff_max,
         )
 
     def close(self) -> None:
@@ -250,33 +272,75 @@ class SecrevoClient:
         )
 
     def _request_json(self, method: str, path: str) -> dict[str, Any]:
-        response = self._client.request(method, path)
-        if response.is_success:
-            payload = response.json()
-            if not isinstance(payload, dict):
-                raise SecrevoAPIError(
-                    f"invalid response payload for {method} {path}: expected object"
+        attempt = 0
+        last_transport_error: Exception | None = None
+        while True:
+            try:
+                response = self._client.request(method, path)
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
+                last_transport_error = exc
+                if attempt >= self._max_retries:
+                    raise SecrevoAPIError(
+                        f"{method} {path} failed after {attempt + 1} attempt(s): "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+                self._sleep(self._compute_backoff(attempt, retry_after=None))
+                attempt += 1
+                continue
+
+            if response.is_success:
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    raise SecrevoAPIError(
+                        f"invalid response payload for {method} {path}: expected object"
+                    )
+                return payload
+
+            if response.status_code in (401, 403):
+                error_body = (response.text or "").lower()
+                if "agent" in error_body and (
+                    "revoked" in error_body or "paused" in error_body
+                ):
+                    raise AgentRevokedError(
+                        "the agent token used by the SDK has been paused or revoked. "
+                        "Ask the workspace owner to mint a new token."
+                    )
+
+            if response.status_code in RETRYABLE_STATUS and attempt < self._max_retries:
+                retry_after_hint = (
+                    _parse_retry_after(response.headers.get("retry-after"))
+                    if response.status_code == 429
+                    else None
                 )
-            return payload
-        if response.status_code == 401 or response.status_code == 403:
-            error_body = (response.text or "").lower()
-            if "agent" in error_body and ("revoked" in error_body or "paused" in error_body):
-                raise AgentRevokedError(
-                    "the agent token used by the SDK has been paused or revoked. "
-                    "Ask the workspace owner to mint a new token."
+                self._sleep(self._compute_backoff(attempt, retry_after=retry_after_hint))
+                attempt += 1
+                continue
+
+            if response.status_code == 429:
+                retry_after = _parse_retry_after(response.headers.get("retry-after"))
+                raise RateLimitedError(
+                    f"rate limited by the Secrevo API on {method} {path}; "
+                    f"retry after ~{retry_after:.0f}s",
+                    status_code=429,
+                    retry_after_seconds=retry_after,
                 )
-        if response.status_code == 429:
-            retry_after = _parse_retry_after(response.headers.get("retry-after"))
-            raise RateLimitedError(
-                f"rate limited by the Secrevo API on {method} {path}; "
-                f"retry after ~{retry_after:.0f}s",
-                status_code=429,
-                retry_after_seconds=retry_after,
+
+            raise SecrevoAPIError(
+                self._format_error(response, method, path),
+                status_code=response.status_code,
             )
-        raise SecrevoAPIError(
-            self._format_error(response, method, path),
-            status_code=response.status_code,
-        )
+
+    def _compute_backoff(self, attempt: int, *, retry_after: float | None) -> float:
+        """Return seconds to wait before retry attempt N (0-indexed).
+
+        If the server provided a ``Retry-After`` value, honor it (clamped to
+        ``retry_backoff_max``). Otherwise use exponential backoff with full
+        jitter: ``random([0, base * 2^attempt])`` capped at ``backoff_max``.
+        """
+        if retry_after is not None:
+            return min(retry_after, self._retry_backoff_max)
+        ceiling = min(self._retry_backoff_base * (2 ** attempt), self._retry_backoff_max)
+        return random.uniform(0, ceiling)
 
     @staticmethod
     def _format_error(response: httpx.Response, method: str, path: str) -> str:
