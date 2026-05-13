@@ -25,17 +25,25 @@ The integrations are imported lazily, so the base install only depends on
 
     from secrevo_sdk import SecrevoClient
 
-    with SecrevoClient(
-        base_url="https://api.secrevo.com",
-        workspace_id="workspace-...",
-        token="agt_...",
-    ) as secrevo:
+    # Reads SECREVO_API_BASE_URL, SECREVO_WORKSPACE_ID, SECREVO_API_TOKEN.
+    # Run `secrevo login` once, then any process in the shell can do this.
+    with SecrevoClient.from_env() as secrevo:
         openai = secrevo.openai_for("OPENAI_API_KEY")
         result = openai.responses.create(
             model="gpt-5",
             input="What is the capital of France?",
         )
         print(result.output_text)
+
+If you prefer explicit construction (e.g. binding to a specific workspace
+inside a multi-tenant app):
+
+    with SecrevoClient(
+        base_url="https://api.secrevo.com",
+        workspace_id="workspace-...",
+        token="agt_...",
+    ) as secrevo:
+        ...
 
 The OpenAI client is the canonical `openai.OpenAI` object. The same pattern
 works for Anthropic (`anthropic_for`), Stripe (`stripe_for`), AWS

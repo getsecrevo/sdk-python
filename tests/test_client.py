@@ -65,6 +65,40 @@ def make_client(handler: Callable[[httpx.Request], httpx.Response]) -> SecrevoCl
     )
 
 
+def test_from_env_reads_standard_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SECREVO_API_BASE_URL", "https://api.secrevo.local")
+    monkeypatch.setenv("SECREVO_WORKSPACE_ID", "ws-1")
+    monkeypatch.setenv("SECREVO_API_TOKEN", "agt_xyz")
+
+    client = SecrevoClient.from_env(transport=httpx.MockTransport(build_handler()))
+
+    assert client.workspace_id == "ws-1"
+    # Hit the API to confirm the constructed client is functional.
+    secrets = client.list_secrets()
+    assert secrets[0].name == "api-key"
+
+
+def test_from_env_raises_on_missing_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SECREVO_API_BASE_URL", "https://api.secrevo.local")
+    monkeypatch.setenv("SECREVO_WORKSPACE_ID", "ws-1")
+    monkeypatch.delenv("SECREVO_API_TOKEN", raising=False)
+
+    with pytest.raises(ValueError) as info:
+        SecrevoClient.from_env()
+    assert "SECREVO_API_TOKEN" in str(info.value)
+    assert "secrevo login" in str(info.value)
+
+
+def test_from_env_raises_on_empty_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SECREVO_API_BASE_URL", "https://api.secrevo.local")
+    monkeypatch.setenv("SECREVO_WORKSPACE_ID", "   ")
+    monkeypatch.setenv("SECREVO_API_TOKEN", "agt_xyz")
+
+    with pytest.raises(ValueError) as info:
+        SecrevoClient.from_env()
+    assert "SECREVO_WORKSPACE_ID" in str(info.value)
+
+
 def test_normalize_access_mode_aliases() -> None:
     assert normalize_access_mode(None) == "standard"
     assert normalize_access_mode("default") == "standard"
