@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -13,6 +14,10 @@ from .exceptions import (
     SecrevoAPIError,
 )
 from .models import SecretAccess, SecretRecord, SecretValue
+
+ENV_BASE_URL = "SECREVO_API_BASE_URL"
+ENV_WORKSPACE_ID = "SECREVO_WORKSPACE_ID"
+ENV_TOKEN = "SECREVO_API_TOKEN"
 
 _ACCESS_MODE_ALIASES = {
     "": "standard",
@@ -82,6 +87,33 @@ class SecrevoClient:
             transport=transport,
         )
         self._secret_index: dict[str, SecretRecord] | None = None
+
+    @classmethod
+    def from_env(
+        cls,
+        *,
+        timeout: float | httpx.Timeout = 10.0,
+        transport: httpx.BaseTransport | None = None,
+    ) -> "SecrevoClient":
+        """Construct a client from the standard Secrevo environment variables.
+
+        Reads ``SECREVO_API_BASE_URL``, ``SECREVO_WORKSPACE_ID`` and
+        ``SECREVO_API_TOKEN``. Missing or empty values raise
+        :class:`ValueError` with the exact variable name so the caller can
+        fix the misconfiguration without guessing.
+
+        This is the idiomatic entry point when the application is already
+        configured through env vars (e.g. running under ``secrevo run`` or
+        a CI environment). For explicit construction use the regular
+        constructor.
+        """
+        return cls(
+            base_url=_require_env(ENV_BASE_URL),
+            workspace_id=_require_env(ENV_WORKSPACE_ID),
+            token=_require_env(ENV_TOKEN),
+            timeout=timeout,
+            transport=transport,
+        )
 
     def close(self) -> None:
         self._client.close()
@@ -268,6 +300,16 @@ def _require_text(value: str, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string")
     return value.strip()
+
+
+def _require_env(name: str) -> str:
+    raw = os.environ.get(name, "")
+    if not raw.strip():
+        raise ValueError(
+            f"{name} is required but not set. Run `secrevo login` or export "
+            f"the variable manually."
+        )
+    return raw.strip()
 
 
 def _parse_retry_after(raw: str | None) -> float:
