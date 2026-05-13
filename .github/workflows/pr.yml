@@ -1,0 +1,42 @@
+name: pr
+
+# Runs on every pull request targeting main, and on push to main. The
+# sdk publishes via publish.yml on version tags; this workflow exists
+# to catch regressions at PR time before they reach main (and before
+# a downstream `pip install secrevo-sdk` user finds them).
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors the classifiers in pyproject.toml. 3.10 is the floor
+        # (requires-python = ">=3.10"); 3.13 is the current latest.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: pytest
+        run: pytest -q
