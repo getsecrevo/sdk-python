@@ -1,3 +1,4 @@
+from .async_client import AsyncSecrevoClient
 from .client import (
     ENV_BASE_URL,
     ENV_TOKEN,
@@ -17,6 +18,7 @@ from .models import SecretAccess, SecretRecord, SecretValue
 
 __all__ = [
     "AgentRevokedError",
+    "AsyncSecrevoClient",
     "ENV_BASE_URL",
     "ENV_TOKEN",
     "ENV_WORKSPACE_ID",

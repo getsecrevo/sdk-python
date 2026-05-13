@@ -27,6 +27,7 @@ classifiers = [
 [project.optional-dependencies]
 test = [
   "pytest>=8",
+  "pytest-asyncio>=0.23",
 ]
 openai = ["openai>=1.0"]
 anthropic = ["anthropic>=0.30"]
@@ -58,3 +59,4 @@ secrevo_sdk = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+asyncio_default_fixture_loop_scope = "function"

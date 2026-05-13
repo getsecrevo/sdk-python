@@ -45,6 +45,23 @@ inside a multi-tenant app):
     ) as secrevo:
         ...
 
+## Async
+
+For FastAPI, batch LLM calls, or anything else that lives in an event
+loop, the SDK ships an `AsyncSecrevoClient` with the same surface but
+async methods. Integration helpers return the third-party async client
+where one exists (`openai.AsyncOpenAI`, `anthropic.AsyncAnthropic`):
+
+    from secrevo_sdk import AsyncSecrevoClient
+
+    async with AsyncSecrevoClient.from_env() as secrevo:
+        openai = await secrevo.openai_for("OPENAI_API_KEY")
+        result = await openai.responses.create(
+            model="gpt-5",
+            input="What is the capital of France?",
+        )
+        print(result.output_text)
+
 The OpenAI client is the canonical `openai.OpenAI` object. The same pattern
 works for Anthropic (`anthropic_for`), Stripe (`stripe_for`), AWS
 (`aws_session_for`) and GitHub (`github_for`). Every reveal goes through
