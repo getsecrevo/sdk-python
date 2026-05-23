@@ -124,7 +124,7 @@ required.
 ## Cross-references
 
 - Product website: <https://secrevo.com>
+- Docs / quickstart: <https://secrevo.com/docs>
 - Status page: <https://secrevo.com/status>
 - Privacy / Terms / DPA: <https://secrevo.com/privacy>, <https://secrevo.com/terms>, <https://secrevo.com/dpa>
-- API repo: <https://github.com/getsecrevo/api>
-- Infrastructure: <https://github.com/getsecrevo/infrastructure>
+- CLI: <https://github.com/getsecrevo/cli>
