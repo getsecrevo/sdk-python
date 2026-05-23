@@ -111,6 +111,42 @@ top-level guard.
     )
     s3 = session.client("s3")
 
+## Offline resilience
+
+Long-running services on intermittent networks (kiosks, mini-PCs on client
+LANs) can opt into an encrypted local cache. When the API is unreachable,
+the SDK falls back to the last cached value and flags the result with
+`degraded=True` instead of crashing the worker.
+
+    pip install "secrevo-sdk[cache]"
+
+Default cache — 24h TTL, platform user cache dir, key derived from the
+agent token via HKDF-SHA256:
+
+    with SecrevoClient.from_env(cache="auto") as secrevo:
+        revealed = secrevo.reveal_value("OPENAI_API_KEY")
+        if revealed.degraded:
+            log.warning("serving cached OPENAI_API_KEY — API unreachable")
+
+Explicit configuration:
+
+    from datetime import timedelta
+    from secrevo_sdk import SecrevoClient
+    from secrevo_sdk.cache import FileCache, derive_cache_key
+
+    cache = FileCache(
+        directory="/var/lib/myapp/secrevo-cache",
+        encryption_key=derive_cache_key("agt_..."),
+        max_age=timedelta(hours=6),
+    )
+    client = SecrevoClient(base_url="...", workspace_id="...", token="agt_...", cache=cache)
+    client.set_offline(True)  # skip the API entirely; cache misses raise SecrevoOfflineError
+
+On disk every entry is AES-256-GCM with a per-write random nonce; filenames
+are SHA-256 of the cache key, so the directory listing never leaks secret
+names. Rotating the agent token automatically invalidates the cache (the
+HKDF-derived key changes, decrypt fails, the entry is unlinked).
+
 ## Local development
 
     python -m venv .venv

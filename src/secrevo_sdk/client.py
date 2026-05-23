@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import logging
 import os
 import random
 import time
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 import httpx
 
@@ -13,8 +14,14 @@ from .exceptions import (
     RateLimitedError,
     SecretNotFoundError,
     SecrevoAPIError,
+    SecrevoOfflineError,
 )
 from .models import SecretAccess, SecretRecord, SecretValue
+
+if TYPE_CHECKING:
+    from .cache import FileCache
+
+_cache_logger = logging.getLogger("secrevo_sdk.cache")
 
 ENV_BASE_URL = "SECREVO_API_BASE_URL"
 ENV_WORKSPACE_ID = "SECREVO_WORKSPACE_ID"
@@ -85,12 +92,14 @@ class SecrevoClient:
         retry_backoff_base: float = DEFAULT_RETRY_BACKOFF_BASE,
         retry_backoff_max: float = DEFAULT_RETRY_BACKOFF_MAX,
         sleep: Callable[[float], None] = time.sleep,
+        cache: "FileCache | Literal['auto'] | None" = None,
     ) -> None:
+        clean_token = _require_text(token, "token")
         self._workspace_id = _require_text(workspace_id, "workspace_id")
         self._client = httpx.Client(
             base_url=_require_text(base_url, "base_url"),
             headers={
-                "Authorization": f"Bearer {_require_text(token, 'token')}",
+                "Authorization": f"Bearer {clean_token}",
                 "Accept": "application/json",
             },
             timeout=timeout,
@@ -103,6 +112,21 @@ class SecrevoClient:
         self._retry_backoff_base = retry_backoff_base
         self._retry_backoff_max = retry_backoff_max
         self._sleep = sleep
+        self._cache = self._resolve_cache(cache, clean_token)
+        self._offline = False
+
+    @staticmethod
+    def _resolve_cache(
+        cache: "FileCache | Literal['auto'] | None",
+        token: str,
+    ) -> "FileCache | None":
+        if cache is None:
+            return None
+        if cache == "auto":
+            from .cache import FileCache, derive_cache_key
+
+            return FileCache(encryption_key=derive_cache_key(token))
+        return cache
 
     @classmethod
     def from_env(
@@ -208,13 +232,92 @@ class SecrevoClient:
         On the wire this hits ``GET /v1/workspaces/{ws}/secrets/{id}/value``,
         which the API records as a ``secret.value.read`` audit event so
         the workspace owner sees who accessed what.
+
+        If the client was constructed with a ``cache`` (and the API is
+        unreachable or returns a transient failure), the SDK falls back
+        to the most recent cached value within the cache's ``max_age``
+        window and flags the returned :class:`SecretValue` with
+        ``degraded=True``. In ``set_offline(True)`` mode the API call is
+        skipped entirely.
         """
-        secret = self._resolve_secret_by_name(secret_name)
-        payload = self._request_json(
-            "GET",
-            f"/v1/workspaces/{self._workspace_id}/secrets/{secret.secret_id}/value",
+        normalized_name = _require_text(secret_name, "secret_name")
+        cache_key = self._cache_key_for(normalized_name)
+
+        if self._offline:
+            cached = self._cache.get(cache_key) if self._cache else None
+            if cached is None:
+                raise SecrevoOfflineError(
+                    f"client is offline and {normalized_name!r} is not in the cache"
+                )
+            return self._cached_secret_value(normalized_name, cached, degraded=True)
+
+        try:
+            secret = self._resolve_secret_by_name(normalized_name)
+            payload = self._request_json(
+                "GET",
+                f"/v1/workspaces/{self._workspace_id}/secrets/{secret.secret_id}/value",
+            )
+        except SecrevoAPIError:
+            cached = self._cache.get(cache_key) if self._cache else None
+            if cached is None:
+                raise
+            _cache_logger.warning(
+                "fallback_to_cache_after_api_failure key=%s", normalized_name
+            )
+            return self._cached_secret_value(normalized_name, cached, degraded=True)
+
+        value = SecretValue.from_payload(secret, payload)
+        if self._cache is not None:
+            self._cache.set(
+                cache_key,
+                value=value.value,
+                kind="secret_value",
+                metadata={
+                    "workspace_id": secret.workspace_id,
+                    "secret_id": secret.secret_id,
+                    "name": secret.name,
+                    "status": secret.status,
+                    "updated_at": secret.updated_at,
+                },
+            )
+        return value
+
+    def set_offline(self, offline: bool) -> None:
+        """Toggle offline mode.
+
+        When ``True``, :meth:`reveal_value` skips the API and reads
+        exclusively from the disk cache. A cache miss raises
+        :class:`SecrevoOfflineError`. Useful for tests, disaster
+        drills, and scheduled "what would survive a network outage"
+        audits in long-running services.
+        """
+        self._offline = bool(offline)
+
+    @property
+    def offline(self) -> bool:
+        return self._offline
+
+    @property
+    def cache(self) -> "FileCache | None":
+        return self._cache
+
+    def _cache_key_for(self, secret_name: str) -> str:
+        return f"{self._workspace_id}:{secret_name}"
+
+    def _cached_secret_value(
+        self, secret_name: str, cached: Any, *, degraded: bool
+    ) -> SecretValue:
+        metadata = cached.metadata or {}
+        record = SecretRecord(
+            workspace_id=str(metadata.get("workspace_id") or self._workspace_id),
+            secret_id=str(metadata.get("secret_id") or ""),
+            name=str(metadata.get("name") or secret_name),
+            description="",
+            regeneration_instructions="",
+            status=str(metadata.get("status") or "active"),
+            updated_at=str(metadata.get("updated_at") or ""),
         )
-        return SecretValue.from_payload(secret, payload)
+        return SecretValue(secret=record, value=cached.value, degraded=degraded)
 
     # --- Integrations --------------------------------------------------------
 

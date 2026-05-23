@@ -56,6 +56,16 @@ class RateLimitedError(SecrevoAPIError):
     """Raised when the Secrevo API rate limits the caller (HTTP 429)."""
 
 
+class SecrevoOfflineError(SecrevoError):
+    """Raised when the client is in offline mode and the cache has no entry.
+
+    The client only enters offline mode when the caller explicitly opts in
+    via :meth:`SecrevoClient.set_offline`. If you reach this exception, the
+    SDK has been told not to hit the API and the requested secret was not
+    present in the local cache (or was past ``max_age``).
+    """
+
+
 class IntegrationNotInstalledError(SecrevoError):
     """Raised when an integration helper is used without the third-party
     library installed.
