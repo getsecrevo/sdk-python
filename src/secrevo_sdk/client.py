@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
 import httpx
@@ -15,6 +16,7 @@ from .exceptions import (
     SecretNotFoundError,
     SecrevoAPIError,
     SecrevoOfflineError,
+    SecrevoPreviousValueNotFoundError,
 )
 from .models import SecretAccess, SecretRecord, SecretValue
 
@@ -221,7 +223,12 @@ class SecrevoClient:
 
     # --- Reveal --------------------------------------------------------------
 
-    def reveal_value(self, secret_name: str) -> SecretValue:
+    def reveal_value(
+        self,
+        secret_name: str,
+        *,
+        version: Literal["current", "previous"] = "current",
+    ) -> SecretValue:
         """Reveal the plaintext value of a secret.
 
         The returned object holds both the metadata and the value. The
@@ -233,16 +240,71 @@ class SecrevoClient:
         which the API records as a ``secret.value.read`` audit event so
         the workspace owner sees who accessed what.
 
-        If the client was constructed with a ``cache`` (and the API is
-        unreachable or returns a transient failure), the SDK falls back
-        to the most recent cached value within the cache's ``max_age``
-        window and flags the returned :class:`SecretValue` with
-        ``degraded=True``. In ``set_offline(True)`` mode the API call is
-        skipped entirely.
+        ``version`` selects which materialization to read:
+
+        * ``"current"`` (default) — the live value. Cache-integrated:
+          on transient API failure or in ``set_offline(True)`` mode,
+          the SDK falls back to the most recent cached value within
+          the cache's ``max_age`` window and flags the returned
+          :class:`SecretValue` with ``degraded=True``.
+        * ``"previous"`` — the previous value during the rotation
+          grace window opened by api#46. Hits the ``?version=previous``
+          variant of the endpoint. The disk cache is deliberately
+          BYPASSED for previous-value reads (both read and write):
+          the cache contract is "the operator's view of the current
+          value, used to survive transient API outages", and caching
+          previous-value reads would invite consuming stale rolled-back
+          values long after the grace window expired. Previous-value
+          reads are one-off operator actions during rotation, not the
+          hot path. On a successful previous-value response the
+          ``X-Secrevo-Grace-Expires-At`` header is parsed and surfaced
+          as :attr:`SecretValue.grace_expires_at`. If no grace window
+          is active, the API returns ``404 not_found_previous`` which
+          the SDK raises as
+          :class:`SecrevoPreviousValueNotFoundError`.
         """
         normalized_name = _require_text(secret_name, "secret_name")
+        if version not in ("current", "previous"):
+            raise ValueError(
+                f"version must be 'current' or 'previous', got {version!r}"
+            )
         cache_key = self._cache_key_for(normalized_name)
 
+        # Previous-value reads NEVER touch the disk cache (read or write).
+        # See docstring above for rationale. We still honor offline mode
+        # by failing loudly: a previous-value read in offline mode is
+        # almost certainly a misuse and silently returning the cached
+        # CURRENT value would be a footgun.
+        if version == "previous":
+            if self._offline:
+                raise SecrevoOfflineError(
+                    "previous-value reads require network access; "
+                    "the disk cache only stores current values"
+                )
+            secret = self._resolve_secret_by_name(normalized_name)
+            path = (
+                f"/v1/workspaces/{self._workspace_id}"
+                f"/secrets/{secret.secret_id}/value"
+            )
+            try:
+                payload, headers = self._request_json_with_headers(
+                    "GET", path, params={"version": "previous"}
+                )
+            except SecrevoAPIError as exc:
+                if exc.status_code == 404 and _is_not_found_previous(exc):
+                    raise SecrevoPreviousValueNotFoundError(
+                        normalized_name
+                    ) from exc
+                raise
+            grace_expires_at = _parse_grace_header(
+                headers.get("X-Secrevo-Grace-Expires-At")
+                or headers.get("x-secrevo-grace-expires-at")
+            )
+            return SecretValue.from_payload(
+                secret, payload, grace_expires_at=grace_expires_at
+            )
+
+        # version == "current": existing path, unchanged behavior.
         if self._offline:
             cached = self._cache.get(cache_key) if self._cache else None
             if cached is None:
@@ -375,11 +437,21 @@ class SecrevoClient:
         )
 
     def _request_json(self, method: str, path: str) -> dict[str, Any]:
+        payload, _ = self._request_json_with_headers(method, path)
+        return payload
+
+    def _request_json_with_headers(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         attempt = 0
         last_transport_error: Exception | None = None
         while True:
             try:
-                response = self._client.request(method, path)
+                response = self._client.request(method, path, params=params)
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 last_transport_error = exc
                 if attempt >= self._max_retries:
@@ -397,7 +469,7 @@ class SecrevoClient:
                     raise SecrevoAPIError(
                         f"invalid response payload for {method} {path}: expected object"
                     )
-                return payload
+                return payload, dict(response.headers)
 
             if response.status_code in (401, 403):
                 error_body = (response.text or "").lower()
@@ -431,6 +503,7 @@ class SecrevoClient:
             raise SecrevoAPIError(
                 self._format_error(response, method, path),
                 status_code=response.status_code,
+                response_body=response.text,
             )
 
     def _compute_backoff(self, attempt: int, *, retry_after: float | None) -> float:
@@ -477,6 +550,45 @@ def _require_env(name: str) -> str:
             f"the variable manually."
         )
     return raw.strip()
+
+
+def _is_not_found_previous(exc: SecrevoAPIError) -> bool:
+    """Return ``True`` if the API error body identifies the ``not_found_previous``
+    error code shipped by api#46 for missing-grace previous-value reads.
+
+    We inspect the raw response body so a regular 404 (e.g. the secret
+    doesn't exist at all) doesn't get mis-mapped to
+    :class:`SecrevoPreviousValueNotFoundError`.
+    """
+    body = (exc.response_body or "").lower()
+    return "not_found_previous" in body
+
+
+def _parse_grace_header(raw: str | None) -> datetime | None:
+    """Parse ``X-Secrevo-Grace-Expires-At`` into a timezone-aware UTC datetime.
+
+    The API emits ISO-8601 (e.g. ``2026-06-02T12:34:56Z``). Returns
+    ``None`` if the header is missing or unparseable — we never let a
+    malformed header crash a reveal call, since the value itself is
+    still usable.
+    """
+    if not raw:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        # ``fromisoformat`` accepts the trailing ``Z`` on Python 3.11+.
+        # For 3.10 we fall back to manual ``+00:00`` substitution.
+        candidate = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+        dt = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        from datetime import timezone
+
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _parse_retry_after(raw: str | None) -> float:

@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import random
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 
 import httpx
 
@@ -42,6 +42,8 @@ from .client import (
     ENV_TOKEN,
     ENV_WORKSPACE_ID,
     RETRYABLE_STATUS,
+    _is_not_found_previous,
+    _parse_grace_header,
     _parse_retry_after,
     _require_env,
     _require_text,
@@ -53,6 +55,7 @@ from .exceptions import (
     RateLimitedError,
     SecretNotFoundError,
     SecrevoAPIError,
+    SecrevoPreviousValueNotFoundError,
 )
 from .models import SecretAccess, SecretRecord, SecretValue
 
@@ -176,12 +179,47 @@ class AsyncSecrevoClient:
 
     # --- Reveal --------------------------------------------------------------
 
-    async def reveal_value(self, secret_name: str) -> SecretValue:
+    async def reveal_value(
+        self,
+        secret_name: str,
+        *,
+        version: Literal["current", "previous"] = "current",
+    ) -> SecretValue:
+        """Async equivalent of :meth:`SecrevoClient.reveal_value`.
+
+        Supports the same ``version`` parameter for reading
+        rotation-grace previous values. The async client is not
+        cache-integrated (the disk cache lives on the sync client
+        only), so previous-value reads here follow the same wire
+        protocol as current reads — they just append ``?version=previous``
+        and parse the ``X-Secrevo-Grace-Expires-At`` header.
+        """
+        if version not in ("current", "previous"):
+            raise ValueError(
+                f"version must be 'current' or 'previous', got {version!r}"
+            )
         secret = await self._resolve_secret_by_name(secret_name)
-        payload = await self._request_json(
-            "GET",
-            f"/v1/workspaces/{self._workspace_id}/secrets/{secret.secret_id}/value",
-        )
+        path = f"/v1/workspaces/{self._workspace_id}/secrets/{secret.secret_id}/value"
+        if version == "previous":
+            try:
+                payload, headers = await self._request_json_with_headers(
+                    "GET", path, params={"version": "previous"}
+                )
+            except SecrevoAPIError as exc:
+                if exc.status_code == 404 and _is_not_found_previous(exc):
+                    raise SecrevoPreviousValueNotFoundError(
+                        _require_text(secret_name, "secret_name")
+                    ) from exc
+                raise
+            grace_expires_at = _parse_grace_header(
+                headers.get("X-Secrevo-Grace-Expires-At")
+                or headers.get("x-secrevo-grace-expires-at")
+            )
+            return SecretValue.from_payload(
+                secret, payload, grace_expires_at=grace_expires_at
+            )
+
+        payload = await self._request_json("GET", path)
         return SecretValue.from_payload(secret, payload)
 
     # --- Integrations --------------------------------------------------------
@@ -268,10 +306,20 @@ class AsyncSecrevoClient:
         )
 
     async def _request_json(self, method: str, path: str) -> dict[str, Any]:
+        payload, _ = await self._request_json_with_headers(method, path)
+        return payload
+
+    async def _request_json_with_headers(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         attempt = 0
         while True:
             try:
-                response = await self._client.request(method, path)
+                response = await self._client.request(method, path, params=params)
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 if attempt >= self._max_retries:
                     raise SecrevoAPIError(
@@ -288,7 +336,7 @@ class AsyncSecrevoClient:
                     raise SecrevoAPIError(
                         f"invalid response payload for {method} {path}: expected object"
                     )
-                return payload
+                return payload, dict(response.headers)
 
             if response.status_code in (401, 403):
                 error_body = (response.text or "").lower()
@@ -324,6 +372,7 @@ class AsyncSecrevoClient:
             raise SecrevoAPIError(
                 self._format_error(response, method, path),
                 status_code=response.status_code,
+                response_body=response.text,
             )
 
     def _compute_backoff(self, attempt: int, *, retry_after: float | None) -> float:

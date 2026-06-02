@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Mapping
 
 
@@ -41,17 +42,32 @@ class SecretValue:
     cache because the API was unreachable. Consumers that need
     freshness guarantees (e.g. rotating credentials) should branch on
     this flag.
+
+    ``grace_expires_at`` is set only when the value was read with
+    ``version="previous"``. It carries the timezone-aware UTC datetime
+    at which the previous-value grace window expires, parsed from the
+    ``X-Secrevo-Grace-Expires-At`` response header. For current-value
+    reads (the default) this is always ``None``.
     """
 
     secret: SecretRecord
     value: str
     degraded: bool = False
+    grace_expires_at: datetime | None = None
 
     @classmethod
     def from_payload(
-        cls, secret: SecretRecord, payload: Mapping[str, Any]
+        cls,
+        secret: SecretRecord,
+        payload: Mapping[str, Any],
+        *,
+        grace_expires_at: datetime | None = None,
     ) -> "SecretValue":
-        return cls(secret=secret, value=_require_text(payload, "value"))
+        return cls(
+            secret=secret,
+            value=_require_text(payload, "value"),
+            grace_expires_at=grace_expires_at,
+        )
 
 
 @dataclass(frozen=True, slots=True)
