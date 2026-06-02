@@ -38,7 +38,12 @@ class AgentRevokedError(SecrevoError):
 
 
 class SecrevoAPIError(SecrevoError):
-    """Raised when the Secrevo API returns a non-success response."""
+    """Raised when the Secrevo API returns a non-success response.
+
+    ``response_body`` carries the raw text body of the failing response
+    (when one was received). Useful for inspecting structured error
+    codes like ``not_found_previous`` without re-parsing the message.
+    """
 
     def __init__(
         self,
@@ -46,14 +51,36 @@ class SecrevoAPIError(SecrevoError):
         *,
         status_code: int | None = None,
         retry_after_seconds: float | None = None,
+        response_body: str | None = None,
     ):
         super().__init__(message)
         self.status_code = status_code
         self.retry_after_seconds = retry_after_seconds
+        self.response_body = response_body
 
 
 class RateLimitedError(SecrevoAPIError):
     """Raised when the Secrevo API rate limits the caller (HTTP 429)."""
+
+
+class SecrevoPreviousValueNotFoundError(SecrevoAPIError):
+    """Raised when a previous-value read finds no active grace window.
+
+    Distinct from a plain 404 on the current-value endpoint: this means
+    the secret exists, but either rotation happened without grace, or
+    the grace window has already expired.
+
+    Raised when ``reveal_value(name, version="previous")`` receives an
+    HTTP 404 with the ``not_found_previous`` error code from the API.
+    """
+
+    def __init__(self, secret_name: str, *, status_code: int | None = 404):
+        self.secret_name = secret_name
+        message = (
+            f"No previous value available for {secret_name}. "
+            "Either rotation was done without grace, or grace window expired."
+        )
+        super().__init__(message, status_code=status_code)
 
 
 class SecrevoOfflineError(SecrevoError):
