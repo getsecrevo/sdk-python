@@ -36,10 +36,16 @@ class SecretValue:
     Returned by :meth:`SecrevoClient.reveal_value`. Treat ``value`` as
     sensitive: it is the raw credential. Avoid printing it, logging it,
     or storing it on disk.
+
+    ``degraded`` is ``True`` when the value came from the local disk
+    cache because the API was unreachable. Consumers that need
+    freshness guarantees (e.g. rotating credentials) should branch on
+    this flag.
     """
 
     secret: SecretRecord
     value: str
+    degraded: bool = False
 
     @classmethod
     def from_payload(

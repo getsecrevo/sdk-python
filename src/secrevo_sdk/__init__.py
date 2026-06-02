@@ -16,6 +16,7 @@ from .exceptions import (
     SecretNotFoundError,
     SecrevoAPIError,
     SecrevoError,
+    SecrevoOfflineError,
 )
 from .models import SecretAccess, SecretRecord, SecretValue
 
@@ -42,6 +43,7 @@ __all__ = [
     "SecrevoAPIError",
     "SecrevoClient",
     "SecrevoError",
+    "SecrevoOfflineError",
     "__version__",
     "normalize_access_mode",
 ]
