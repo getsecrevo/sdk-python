@@ -37,7 +37,10 @@ def build_handler(
             return httpx.Response(200, json={"secrets": secrets})
         if path == "/v1/workspaces/ws-1/secrets/sec-123":
             return httpx.Response(200, json=SECRET_PAYLOAD)
-        if path == "/v1/workspaces/ws-1/secrets/sec-123/value":
+        if path in (
+            "/v1/workspaces/ws-1/secrets/sec-123/value",
+            "/v1/workspaces/ws-1/secrets/by-name/api-key/value",
+        ):
             if value is None:
                 return httpx.Response(403, text="forbidden")
             return httpx.Response(

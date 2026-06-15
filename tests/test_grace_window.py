@@ -69,7 +69,10 @@ def make_handler(
             return httpx.Response(200, json={"secrets": [SECRET_PAYLOAD]})
         if path == "/v1/workspaces/ws-1/secrets/sec-123":
             return httpx.Response(200, json=SECRET_PAYLOAD)
-        if path == "/v1/workspaces/ws-1/secrets/sec-123/value":
+        if path in (
+            "/v1/workspaces/ws-1/secrets/sec-123/value",
+            "/v1/workspaces/ws-1/secrets/by-name/api-key/value",
+        ):
             version = request.url.params.get("version")
             if version == "previous":
                 if previous_value is None:
