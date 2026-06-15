@@ -40,7 +40,13 @@ def build_handler(
             return httpx.Response(200, json={"secrets": secrets})
         if path == "/v1/workspaces/ws-1/secrets/sec-123":
             return httpx.Response(200, json=SECRET_PAYLOAD)
-        if path == "/v1/workspaces/ws-1/secrets/sec-123/value":
+        # reveal_value resolves + reveals in one call against the by-name value
+        # endpoint (so a per-secret grant suffices). The by-id value path is kept
+        # for any direct callers.
+        if path in (
+            "/v1/workspaces/ws-1/secrets/sec-123/value",
+            "/v1/workspaces/ws-1/secrets/by-name/api-key/value",
+        ):
             if value is None:
                 return httpx.Response(403, text="forbidden")
             return httpx.Response(
@@ -170,6 +176,31 @@ def test_reveal_value_returns_plaintext() -> None:
 
     assert revealed.value == "sk-live-123"
     assert revealed.secret.secret_id == "sec-123"
+
+
+def test_reveal_value_works_without_workspace_list_access() -> None:
+    """A caller holding only a per-secret grant (the team-sharing model) can
+    reveal a shared secret: reveal_value must use the by-name value endpoint and
+    never the list endpoint, which requires secret.read@workspace."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        seen.append(path)
+        if path == "/v1/workspaces/ws-1/secrets":
+            return httpx.Response(403, text="forbidden")  # no workspace read
+        if path == "/v1/workspaces/ws-1/secrets/by-name/api-key/value":
+            return httpx.Response(
+                200,
+                json={"workspace_id": "ws-1", "secret_id": "sec-123", "value": "sk-shared"},
+            )
+        return httpx.Response(404, text=f"unexpected: {request.method} {path}")
+
+    revealed = make_client(handler).reveal_value("api-key")
+
+    assert revealed.value == "sk-shared"
+    assert revealed.secret.secret_id == "sec-123"
+    assert "/v1/workspaces/ws-1/secrets" not in seen  # never listed
 
 
 def test_missing_secret_lists_available_names() -> None:

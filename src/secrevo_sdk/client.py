@@ -6,6 +6,7 @@ import random
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Literal
+from urllib.parse import quote
 
 import httpx
 
@@ -281,11 +282,12 @@ class SecrevoClient:
                     "previous-value reads require network access; "
                     "the disk cache only stores current values"
                 )
-            secret = self._resolve_secret_by_name(normalized_name)
-            path = (
-                f"/v1/workspaces/{self._workspace_id}"
-                f"/secrets/{secret.secret_id}/value"
-            )
+            # Resolve + reveal in ONE call against the by-name value endpoint so
+            # a caller holding only a per-secret grant works — listing (the old
+            # resolve path) requires secret.read@workspace, which is overbroad
+            # for the team-sharing model. Same reconciliation the CLI already
+            # uses (RevealSecretValueByName).
+            path = self._value_by_name_path(normalized_name)
             try:
                 payload, headers = self._request_json_with_headers(
                     "GET", path, params={"version": "previous"}
@@ -296,6 +298,7 @@ class SecrevoClient:
                         normalized_name
                     ) from exc
                 raise
+            secret = self._record_from_value_payload(normalized_name, payload)
             grace_expires_at = _parse_grace_header(
                 headers.get("X-Secrevo-Grace-Expires-At")
                 or headers.get("x-secrevo-grace-expires-at")
@@ -314,11 +317,9 @@ class SecrevoClient:
             return self._cached_secret_value(normalized_name, cached, degraded=True)
 
         try:
-            secret = self._resolve_secret_by_name(normalized_name)
-            payload = self._request_json(
-                "GET",
-                f"/v1/workspaces/{self._workspace_id}/secrets/{secret.secret_id}/value",
-            )
+            # By-name reveal (see previous-value branch): one call, works with a
+            # per-secret grant, no workspace-wide list.
+            payload = self._request_json("GET", self._value_by_name_path(normalized_name))
         except SecrevoAPIError:
             cached = self._cache.get(cache_key) if self._cache else None
             if cached is None:
@@ -328,6 +329,7 @@ class SecrevoClient:
             )
             return self._cached_secret_value(normalized_name, cached, degraded=True)
 
+        secret = self._record_from_value_payload(normalized_name, payload)
         value = SecretValue.from_payload(secret, payload)
         if self._cache is not None:
             self._cache.set(
@@ -419,6 +421,26 @@ class SecrevoClient:
         return integrations.github_for(self, secret_name, **kwargs)
 
     # --- Internals -----------------------------------------------------------
+
+    def _value_by_name_path(self, name: str) -> str:
+        return (
+            f"/v1/workspaces/{self._workspace_id}"
+            f"/secrets/by-name/{quote(name, safe='')}/value"
+        )
+
+    def _record_from_value_payload(self, name: str, payload: Any) -> SecretRecord:
+        # The by-name value endpoint returns {workspace_id, secret_id, value}
+        # only — no descriptive metadata. Build a minimal record so SecretValue
+        # still carries the id; callers that need full metadata use get().
+        return SecretRecord(
+            workspace_id=str(payload.get("workspace_id") or self._workspace_id),
+            secret_id=str(payload.get("secret_id") or ""),
+            name=name,
+            description="",
+            regeneration_instructions="",
+            status="active",
+            updated_at="",
+        )
 
     def _resolve_secret_by_name(self, secret_name: str) -> SecretRecord:
         normalized_name = _require_text(secret_name, "secret_name")

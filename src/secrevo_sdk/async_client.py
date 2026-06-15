@@ -31,6 +31,7 @@ import asyncio
 import importlib
 import random
 from typing import Any, Awaitable, Callable, Literal
+from urllib.parse import quote
 
 import httpx
 
@@ -198,8 +199,11 @@ class AsyncSecrevoClient:
             raise ValueError(
                 f"version must be 'current' or 'previous', got {version!r}"
             )
-        secret = await self._resolve_secret_by_name(secret_name)
-        path = f"/v1/workspaces/{self._workspace_id}/secrets/{secret.secret_id}/value"
+        # Resolve + reveal in one call against the by-name value endpoint so a
+        # per-secret grant suffices (listing requires secret.read@workspace,
+        # overbroad for the team-sharing model). Mirrors the sync client + CLI.
+        normalized_name = _require_text(secret_name, "secret_name")
+        path = self._value_by_name_path(normalized_name)
         if version == "previous":
             try:
                 payload, headers = await self._request_json_with_headers(
@@ -208,18 +212,20 @@ class AsyncSecrevoClient:
             except SecrevoAPIError as exc:
                 if exc.status_code == 404 and _is_not_found_previous(exc):
                     raise SecrevoPreviousValueNotFoundError(
-                        _require_text(secret_name, "secret_name")
+                        normalized_name
                     ) from exc
                 raise
             grace_expires_at = _parse_grace_header(
                 headers.get("X-Secrevo-Grace-Expires-At")
                 or headers.get("x-secrevo-grace-expires-at")
             )
+            secret = self._record_from_value_payload(normalized_name, payload)
             return SecretValue.from_payload(
                 secret, payload, grace_expires_at=grace_expires_at
             )
 
         payload = await self._request_json("GET", path)
+        secret = self._record_from_value_payload(normalized_name, payload)
         return SecretValue.from_payload(secret, payload)
 
     # --- Integrations --------------------------------------------------------
@@ -287,6 +293,25 @@ class AsyncSecrevoClient:
         return github_pkg.Github(auth=auth, **kwargs)
 
     # --- Internals -----------------------------------------------------------
+
+    def _value_by_name_path(self, name: str) -> str:
+        return (
+            f"/v1/workspaces/{self._workspace_id}"
+            f"/secrets/by-name/{quote(name, safe='')}/value"
+        )
+
+    def _record_from_value_payload(self, name: str, payload: Any) -> SecretRecord:
+        # The by-name value endpoint returns {workspace_id, secret_id, value}
+        # only — build a minimal record so SecretValue still carries the id.
+        return SecretRecord(
+            workspace_id=str(payload.get("workspace_id") or self._workspace_id),
+            secret_id=str(payload.get("secret_id") or ""),
+            name=name,
+            description="",
+            regeneration_instructions="",
+            status="active",
+            updated_at="",
+        )
 
     async def _resolve_secret_by_name(self, secret_name: str) -> SecretRecord:
         normalized_name = _require_text(secret_name, "secret_name")
