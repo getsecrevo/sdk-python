@@ -19,7 +19,14 @@ from .exceptions import (
     SecrevoOfflineError,
     SecrevoPreviousValueNotFoundError,
 )
-from .models import SecretAccess, SecretRecord, SecretValue
+from .models import (
+    ProxyResponse,
+    ProxySession,
+    ProxyTarget,
+    SecretAccess,
+    SecretRecord,
+    SecretValue,
+)
 
 try:
     __version__ = _pkg_version("secrevo-sdk")
@@ -36,6 +43,9 @@ __all__ = [
     "ENV_TOKEN",
     "ENV_WORKSPACE_ID",
     "IntegrationNotInstalledError",
+    "ProxyResponse",
+    "ProxySession",
+    "ProxyTarget",
     "RateLimitedError",
     "SecretAccess",
     "SecretNotFoundError",

@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 import httpx
 
-from . import integrations
+from . import _proxy, integrations
 from .exceptions import (
     AgentRevokedError,
     RateLimitedError,
@@ -19,7 +19,14 @@ from .exceptions import (
     SecrevoOfflineError,
     SecrevoPreviousValueNotFoundError,
 )
-from .models import SecretAccess, SecretRecord, SecretValue
+from .models import (
+    ProxyResponse,
+    ProxySession,
+    ProxyTarget,
+    SecretAccess,
+    SecretRecord,
+    SecretValue,
+)
 
 if TYPE_CHECKING:
     from .cache import FileCache
@@ -420,6 +427,110 @@ class SecrevoClient:
         """Return a ``github.Github`` client authed with the secret."""
         return integrations.github_for(self, secret_name, **kwargs)
 
+    # --- Mediated proxy (value never reaches this process) -------------------
+
+    def call(
+        self,
+        secret_name: str,
+        *,
+        url: str,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        body: str | None = None,
+    ) -> ProxyResponse:
+        """Use ``secret_name`` in a mediated outbound call and return only the
+        response. The server injects the value server-side (put ``{{secret}}``
+        in a header or the body, never the URL); the plaintext never reaches
+        this process — contrast :meth:`openai_for` et al., which inject locally.
+        """
+        payload, _ = self._request_json_with_headers(
+            "POST",
+            _proxy.proxy_consume_path(self._workspace_id, _require_text(secret_name, "secret_name")),
+            json_body=_proxy.build_request_body(method=method, url=url, headers=headers, body=body),
+        )
+        return ProxyResponse.from_payload(payload)
+
+    def openai_call(self, secret_name: str, path: str, *, method: str = "GET", headers: dict[str, str] | None = None, body: str | None = None) -> ProxyResponse:
+        """Mediated typed call to api.openai.com (host + auth header fixed)."""
+        return self._typed_call("openai", secret_name, path, method=method, headers=headers, body=body)
+
+    def anthropic_call(self, secret_name: str, path: str, *, method: str = "GET", headers: dict[str, str] | None = None, body: str | None = None) -> ProxyResponse:
+        """Mediated typed call to api.anthropic.com (host + auth header fixed)."""
+        return self._typed_call("anthropic", secret_name, path, method=method, headers=headers, body=body)
+
+    def stripe_call(self, secret_name: str, path: str, *, method: str = "GET", headers: dict[str, str] | None = None, body: str | None = None) -> ProxyResponse:
+        """Mediated typed call to api.stripe.com (host + auth header fixed)."""
+        return self._typed_call("stripe", secret_name, path, method=method, headers=headers, body=body)
+
+    def github_call(self, secret_name: str, path: str, *, method: str = "GET", headers: dict[str, str] | None = None, body: str | None = None) -> ProxyResponse:
+        """Mediated typed call to api.github.com (host + auth header fixed)."""
+        return self._typed_call("github", secret_name, path, method=method, headers=headers, body=body)
+
+    def _typed_call(self, provider: str, secret_name: str, path: str, *, method: str, headers: dict[str, str] | None, body: str | None) -> ProxyResponse:
+        url, merged = _proxy.resolve_typed(provider, path, headers)
+        return self.call(secret_name, url=url, method=method, headers=merged, body=body)
+
+    def open_proxy_session(self, secret_name: str) -> ProxySession:
+        """Open a short-lived, identity-bound session for a multi-step mediated
+        flow against ``secret_name``. Use the returned id with
+        :meth:`session_call`; close it with :meth:`close_proxy_session`."""
+        payload, _ = self._request_json_with_headers(
+            "POST",
+            _proxy.proxy_session_open_path(self._workspace_id, _require_text(secret_name, "secret_name")),
+            json_body={},
+        )
+        return ProxySession.from_payload(payload)
+
+    def session_call(
+        self,
+        session_id: str,
+        *,
+        url: str,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        body: str | None = None,
+    ) -> ProxyResponse:
+        """Issue one mediated request inside an open session. Every request is
+        re-authorized and re-checked server-side (revoke mid-session stops the
+        next call). The value never reaches this process."""
+        payload, _ = self._request_json_with_headers(
+            "POST",
+            _proxy.proxy_session_request_path(self._workspace_id, _require_text(session_id, "session_id")),
+            json_body=_proxy.build_request_body(method=method, url=url, headers=headers, body=body),
+        )
+        return ProxyResponse.from_payload(payload)
+
+    def close_proxy_session(self, session_id: str) -> None:
+        """End a session early. A missing session is treated as already closed."""
+        self._request_no_content(
+            "DELETE", _proxy.proxy_session_path(self._workspace_id, _require_text(session_id, "session_id"))
+        )
+
+    def list_proxy_targets(self, secret_name: str) -> list[ProxyTarget]:
+        """List a secret's mediated-proxy allowlist (human session; secret.write)."""
+        secret = self._resolve_secret_by_name(secret_name)
+        payload = self._request_json("GET", _proxy.proxy_targets_path(self._workspace_id, secret.secret_id))
+        return [ProxyTarget.from_payload(t) for t in (payload.get("targets") or [])]
+
+    def put_proxy_target(self, secret_name: str, target: ProxyTarget) -> ProxyTarget:
+        """Upsert one allowlist target for a secret (human session; secret.write)."""
+        secret = self._resolve_secret_by_name(secret_name)
+        payload, _ = self._request_json_with_headers(
+            "PUT",
+            _proxy.proxy_targets_path(self._workspace_id, secret.secret_id),
+            json_body=target.to_payload(),
+        )
+        return ProxyTarget.from_payload(payload)
+
+    def remove_proxy_target(self, secret_name: str, host: str) -> None:
+        """Remove one allowlist target by host (human session; secret.write)."""
+        secret = self._resolve_secret_by_name(secret_name)
+        self._request_no_content(
+            "DELETE",
+            _proxy.proxy_targets_path(self._workspace_id, secret.secret_id),
+            params={"host": _require_text(host, "host")},
+        )
+
     # --- Internals -----------------------------------------------------------
 
     def _value_by_name_path(self, name: str) -> str:
@@ -462,18 +573,41 @@ class SecrevoClient:
         payload, _ = self._request_json_with_headers(method, path)
         return payload
 
+    def _request_no_content(
+        self, method: str, path: str, *, params: dict[str, str] | None = None
+    ) -> None:
+        """Issue a request whose success returns no JSON body (e.g. DELETE 204)."""
+        response = self._client.request(method, path, params=params)
+        if response.is_success:
+            return
+        if response.status_code in (401, 403):
+            error_body = (response.text or "").lower()
+            if "agent" in error_body and ("revoked" in error_body or "paused" in error_body):
+                raise AgentRevokedError(
+                    "the agent token used by the SDK has been paused or revoked. "
+                    "Ask the workspace owner to mint a new token."
+                )
+        raise SecrevoAPIError(
+            self._format_error(response, method, path),
+            status_code=response.status_code,
+            response_body=response.text,
+        )
+
     def _request_json_with_headers(
         self,
         method: str,
         path: str,
         *,
         params: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, str]]:
         attempt = 0
         last_transport_error: Exception | None = None
         while True:
             try:
-                response = self._client.request(method, path, params=params)
+                response = self._client.request(
+                    method, path, params=params, json=json_body
+                )
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 last_transport_error = exc
                 if attempt >= self._max_retries:

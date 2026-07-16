@@ -77,6 +77,106 @@ class SecretAccess:
     context: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class ProxyResponse:
+    """The (projected or redacted) upstream response from a mediated call.
+
+    Returned by :meth:`SecrevoClient.call` and :meth:`SecrevoClient.session_call`.
+    The secret value is **never** part of this object — the server injects it
+    server-side and returns only ``body`` (a declared projection, or a redacted
+    body for human-only targets). ``projected`` is ``True`` when ``body`` is a
+    server-side projection rather than a redacted raw body.
+    """
+
+    status: int
+    headers: dict[str, str] = field(default_factory=dict)
+    body: str = ""
+    truncated: bool = False
+    projected: bool = False
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "ProxyResponse":
+        headers = payload.get("headers") or {}
+        return cls(
+            status=int(payload.get("status") or 0),
+            headers={str(k): str(v) for k, v in dict(headers).items()},
+            body=str(payload.get("body") or ""),
+            truncated=bool(payload.get("truncated")),
+            projected=bool(payload.get("projected")),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProxySession:
+    """A short-lived, identity-bound handle for a multi-step mediated flow.
+
+    Returned by :meth:`SecrevoClient.open_proxy_session`. Pass ``session_id`` to
+    :meth:`SecrevoClient.session_call` for each step. The session is bound to
+    your identity, expires at ``expires_at``, and dies on grant revocation — the
+    value never reaches this process at any step.
+    """
+
+    session_id: str
+    expires_at: str = ""
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "ProxySession":
+        return cls(
+            session_id=_require_text(payload, "session_id"),
+            expires_at=_optional_text(payload, "expires_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyTarget:
+    """One allowlisted operation for a secret's mediated proxy (host + method +
+    path [+ query/body/response contract]). Managed by a human principal only."""
+
+    host: str
+    methods: list[str] = field(default_factory=list)
+    path_prefixes: list[str] = field(default_factory=list)
+    allowed_query: list[str] = field(default_factory=list)
+    query_constraints: dict[str, str] = field(default_factory=dict)
+    body_template: str = ""
+    response_mode: str = "projection"
+    response_fields: list[str] = field(default_factory=list)
+    max_response_bytes: int = 0
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "ProxyTarget":
+        return cls(
+            host=_require_text(payload, "host"),
+            methods=[str(m) for m in (payload.get("methods") or [])],
+            path_prefixes=[str(p) for p in (payload.get("path_prefixes") or [])],
+            allowed_query=[str(q) for q in (payload.get("allowed_query") or [])],
+            query_constraints={
+                str(k): str(v) for k, v in dict(payload.get("query_constraints") or {}).items()
+            },
+            body_template=_optional_text(payload, "body_template"),
+            response_mode=_optional_text(payload, "response_mode") or "projection",
+            response_fields=[str(f) for f in (payload.get("response_fields") or [])],
+            max_response_bytes=int(payload.get("max_response_bytes") or 0),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "host": self.host,
+            "methods": list(self.methods),
+            "path_prefixes": list(self.path_prefixes),
+            "response_mode": self.response_mode,
+            "response_fields": list(self.response_fields),
+        }
+        if self.allowed_query:
+            body["allowed_query"] = list(self.allowed_query)
+        if self.query_constraints:
+            body["query_constraints"] = dict(self.query_constraints)
+        if self.body_template:
+            body["body_template"] = self.body_template
+        if self.max_response_bytes:
+            body["max_response_bytes"] = self.max_response_bytes
+        return body
+
+
 def _require_text(payload: Mapping[str, Any], field_name: str) -> str:
     value = payload.get(field_name)
     if not isinstance(value, str) or not value:
