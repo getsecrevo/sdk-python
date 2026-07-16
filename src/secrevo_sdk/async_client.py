@@ -58,7 +58,15 @@ from .exceptions import (
     SecrevoAPIError,
     SecrevoPreviousValueNotFoundError,
 )
-from .models import SecretAccess, SecretRecord, SecretValue
+from . import _proxy
+from .models import (
+    ProxyResponse,
+    ProxySession,
+    ProxyTarget,
+    SecretAccess,
+    SecretRecord,
+    SecretValue,
+)
 
 
 class AsyncSecrevoClient:
@@ -292,6 +300,99 @@ class AsyncSecrevoClient:
         auth = github_pkg.Auth.Token(token)
         return github_pkg.Github(auth=auth, **kwargs)
 
+    # --- Mediated proxy (value never reaches this process) -------------------
+
+    async def call(
+        self,
+        secret_name: str,
+        *,
+        url: str,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        body: str | None = None,
+    ) -> ProxyResponse:
+        """Async :meth:`SecrevoClient.call` — mediated outbound call; the value
+        never reaches this process."""
+        payload, _ = await self._request_json_with_headers(
+            "POST",
+            _proxy.proxy_consume_path(self._workspace_id, _require_text(secret_name, "secret_name")),
+            json_body=_proxy.build_request_body(method=method, url=url, headers=headers, body=body),
+        )
+        return ProxyResponse.from_payload(payload)
+
+    async def openai_call(self, secret_name: str, path: str, *, method: str = "GET", headers: dict[str, str] | None = None, body: str | None = None) -> ProxyResponse:
+        return await self._typed_call("openai", secret_name, path, method=method, headers=headers, body=body)
+
+    async def anthropic_call(self, secret_name: str, path: str, *, method: str = "GET", headers: dict[str, str] | None = None, body: str | None = None) -> ProxyResponse:
+        return await self._typed_call("anthropic", secret_name, path, method=method, headers=headers, body=body)
+
+    async def stripe_call(self, secret_name: str, path: str, *, method: str = "GET", headers: dict[str, str] | None = None, body: str | None = None) -> ProxyResponse:
+        return await self._typed_call("stripe", secret_name, path, method=method, headers=headers, body=body)
+
+    async def github_call(self, secret_name: str, path: str, *, method: str = "GET", headers: dict[str, str] | None = None, body: str | None = None) -> ProxyResponse:
+        return await self._typed_call("github", secret_name, path, method=method, headers=headers, body=body)
+
+    async def _typed_call(self, provider: str, secret_name: str, path: str, *, method: str, headers: dict[str, str] | None, body: str | None) -> ProxyResponse:
+        url, merged = _proxy.resolve_typed(provider, path, headers)
+        return await self.call(secret_name, url=url, method=method, headers=merged, body=body)
+
+    async def open_proxy_session(self, secret_name: str) -> ProxySession:
+        """Async :meth:`SecrevoClient.open_proxy_session`."""
+        payload, _ = await self._request_json_with_headers(
+            "POST",
+            _proxy.proxy_session_open_path(self._workspace_id, _require_text(secret_name, "secret_name")),
+            json_body={},
+        )
+        return ProxySession.from_payload(payload)
+
+    async def session_call(
+        self,
+        session_id: str,
+        *,
+        url: str,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        body: str | None = None,
+    ) -> ProxyResponse:
+        """Async :meth:`SecrevoClient.session_call`."""
+        payload, _ = await self._request_json_with_headers(
+            "POST",
+            _proxy.proxy_session_request_path(self._workspace_id, _require_text(session_id, "session_id")),
+            json_body=_proxy.build_request_body(method=method, url=url, headers=headers, body=body),
+        )
+        return ProxyResponse.from_payload(payload)
+
+    async def close_proxy_session(self, session_id: str) -> None:
+        """Async :meth:`SecrevoClient.close_proxy_session`."""
+        await self._request_no_content(
+            "DELETE", _proxy.proxy_session_path(self._workspace_id, _require_text(session_id, "session_id"))
+        )
+
+    async def list_proxy_targets(self, secret_name: str) -> list[ProxyTarget]:
+        """Async :meth:`SecrevoClient.list_proxy_targets`."""
+        secret = await self._resolve_secret_by_name(secret_name)
+        payload = await self._request_json("GET", _proxy.proxy_targets_path(self._workspace_id, secret.secret_id))
+        return [ProxyTarget.from_payload(t) for t in (payload.get("targets") or [])]
+
+    async def put_proxy_target(self, secret_name: str, target: ProxyTarget) -> ProxyTarget:
+        """Async :meth:`SecrevoClient.put_proxy_target`."""
+        secret = await self._resolve_secret_by_name(secret_name)
+        payload, _ = await self._request_json_with_headers(
+            "PUT",
+            _proxy.proxy_targets_path(self._workspace_id, secret.secret_id),
+            json_body=target.to_payload(),
+        )
+        return ProxyTarget.from_payload(payload)
+
+    async def remove_proxy_target(self, secret_name: str, host: str) -> None:
+        """Async :meth:`SecrevoClient.remove_proxy_target`."""
+        secret = await self._resolve_secret_by_name(secret_name)
+        await self._request_no_content(
+            "DELETE",
+            _proxy.proxy_targets_path(self._workspace_id, secret.secret_id),
+            params={"host": _require_text(host, "host")},
+        )
+
     # --- Internals -----------------------------------------------------------
 
     def _value_by_name_path(self, name: str) -> str:
@@ -334,17 +435,40 @@ class AsyncSecrevoClient:
         payload, _ = await self._request_json_with_headers(method, path)
         return payload
 
+    async def _request_no_content(
+        self, method: str, path: str, *, params: dict[str, str] | None = None
+    ) -> None:
+        """Issue a request whose success returns no JSON body (e.g. DELETE 204)."""
+        response = await self._client.request(method, path, params=params)
+        if response.is_success:
+            return
+        if response.status_code in (401, 403):
+            error_body = (response.text or "").lower()
+            if "agent" in error_body and ("revoked" in error_body or "paused" in error_body):
+                raise AgentRevokedError(
+                    "the agent token used by the SDK has been paused or revoked. "
+                    "Ask the workspace owner to mint a new token."
+                )
+        raise SecrevoAPIError(
+            self._format_error(response, method, path),
+            status_code=response.status_code,
+            response_body=response.text,
+        )
+
     async def _request_json_with_headers(
         self,
         method: str,
         path: str,
         *,
         params: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, str]]:
         attempt = 0
         while True:
             try:
-                response = await self._client.request(method, path, params=params)
+                response = await self._client.request(
+                    method, path, params=params, json=json_body
+                )
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 if attempt >= self._max_retries:
                     raise SecrevoAPIError(

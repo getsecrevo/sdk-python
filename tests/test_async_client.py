@@ -245,3 +245,28 @@ async def test_async_integration_helpers_raise_with_clear_install_hint(
         with pytest.raises(IntegrationNotInstalledError) as gh_info:
             await client.github_for("api-key")
         assert "pip install PyGithub" in str(gh_info.value)
+
+
+@pytest.mark.asyncio
+async def test_async_call_and_session_flow() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if p == "/v1/workspaces/ws-1/secrets/by-name/ODOO/proxy":
+            return httpx.Response(200, json={"status": 200, "body": "{}", "projected": True})
+        if p == "/v1/workspaces/ws-1/secrets/by-name/ODOO/proxy-session":
+            return httpx.Response(201, json={"session_id": "psess_a", "expires_at": "2026-07-15T00:05:00Z"})
+        if p == "/v1/workspaces/ws-1/proxy-sessions/psess_a/requests":
+            return httpx.Response(200, json={"status": 200, "body": '{"ok":1}', "projected": True})
+        if p == "/v1/workspaces/ws-1/proxy-sessions/psess_a":
+            return httpx.Response(204)
+        return httpx.Response(404, text=p)
+
+    client = make_client(handler)
+    r = await client.call("ODOO", url="https://api.example.com/v1/x", method="POST", headers={"H": "{{secret}}"})
+    assert r.status == 200
+    sess = await client.open_proxy_session("ODOO")
+    assert sess.session_id == "psess_a"
+    sr = await client.session_call(sess.session_id, url="https://api.example.com/v1/y")
+    assert sr.status == 200 and "ok" in sr.body
+    await client.close_proxy_session(sess.session_id)
+    await client.aclose()
