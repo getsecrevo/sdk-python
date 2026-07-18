@@ -20,6 +20,8 @@ from .exceptions import (
     SecrevoPreviousValueNotFoundError,
 )
 from .models import (
+    Cred,
+    CredScope,
     ProxyResponse,
     ProxySession,
     ProxyTarget,
@@ -39,6 +41,8 @@ except PackageNotFoundError:
 __all__ = [
     "AgentRevokedError",
     "AsyncSecrevoClient",
+    "Cred",
+    "CredScope",
     "ENV_BASE_URL",
     "ENV_TOKEN",
     "ENV_WORKSPACE_ID",

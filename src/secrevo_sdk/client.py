@@ -20,6 +20,8 @@ from .exceptions import (
     SecrevoPreviousValueNotFoundError,
 )
 from .models import (
+    Cred,
+    CredScope,
     ProxyResponse,
     ProxySession,
     ProxyTarget,
@@ -529,6 +531,46 @@ class SecrevoClient:
             "DELETE",
             _proxy.proxy_targets_path(self._workspace_id, secret.secret_id),
             params={"host": _require_text(host, "host")},
+        )
+
+    def mint_creds(self, secret_name: str, *, ttl_seconds: int = 0) -> Cred:
+        """Mint a short-lived, scoped ephemeral credential for ``secret_name`` (F3).
+
+        For loads that must see credential bytes (AWS SigV4, DB clients) — the
+        honest answer where :meth:`call` (mediated, value never seen) cannot
+        apply. ``ttl_seconds`` is a request (0 = server default); the mediator
+        clamps it to the per-secret + IAM-role caps. The secret must have a
+        cred-scope set by a human (:meth:`put_cred_scope`), else the mint is
+        refused. The returned :class:`Cred` is scoped + short-lived; never persist it.
+        """
+        payload, _ = self._request_json_with_headers(
+            "POST",
+            _proxy.creds_path(self._workspace_id, _require_text(secret_name, "secret_name")),
+            json_body={"ttl_seconds": int(ttl_seconds)},
+        )
+        return Cred.from_payload(payload)
+
+    def get_cred_scope(self, secret_name: str) -> CredScope:
+        """Return a secret's ephemeral-credential scope (human session; secret.write)."""
+        secret = self._resolve_secret_by_name(secret_name)
+        payload = self._request_json("GET", _proxy.cred_scope_path(self._workspace_id, secret.secret_id))
+        return CredScope.from_payload(payload)
+
+    def put_cred_scope(self, secret_name: str, scope: CredScope) -> CredScope:
+        """Set a secret's ephemeral-credential scope (human session; secret.write)."""
+        secret = self._resolve_secret_by_name(secret_name)
+        payload, _ = self._request_json_with_headers(
+            "PUT",
+            _proxy.cred_scope_path(self._workspace_id, secret.secret_id),
+            json_body=scope.to_payload(),
+        )
+        return CredScope.from_payload(payload)
+
+    def remove_cred_scope(self, secret_name: str) -> None:
+        """Remove a secret's ephemeral-credential scope (human session; secret.write)."""
+        secret = self._resolve_secret_by_name(secret_name)
+        self._request_no_content(
+            "DELETE", _proxy.cred_scope_path(self._workspace_id, secret.secret_id)
         )
 
     # --- Internals -----------------------------------------------------------

@@ -177,6 +177,69 @@ class ProxyTarget:
         return body
 
 
+@dataclass(frozen=True, slots=True)
+class Cred:
+    """A short-lived, scoped ephemeral credential minted for a secret (F3).
+
+    Unlike a mediated call, this credential DOES come back to your process — the
+    deliberate, TTL-bounded exception for loads that must see bytes (AWS SigV4,
+    DB clients). It is scoped and expires at ``expiration``; do not persist it.
+    ``repr`` redacts the live material so an accidental log/traceback never leaks
+    it — read the fields explicitly when you need them.
+    """
+
+    provider: str
+    access_key_id: str = ""
+    secret_access_key: str = ""
+    session_token: str = ""
+    expiration: str = ""
+    ttl_seconds: int = 0
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "Cred":
+        return cls(
+            provider=_optional_text(payload, "provider"),
+            access_key_id=_optional_text(payload, "access_key_id"),
+            secret_access_key=_optional_text(payload, "secret_access_key"),
+            session_token=_optional_text(payload, "session_token"),
+            expiration=_optional_text(payload, "expiration"),
+            ttl_seconds=int(payload.get("ttl_seconds") or 0),
+        )
+
+    def __repr__(self) -> str:  # never leak live material in logs/tracebacks
+        return f"Cred(provider={self.provider!r}, ttl_seconds={self.ttl_seconds}, <redacted>)"
+
+    __str__ = __repr__
+
+
+@dataclass(frozen=True, slots=True)
+class CredScope:
+    """Per-secret declaration of what ephemeral credential it mints and its bounds
+    (F3, human-only to edit). ``provider`` is ``aws_sts`` (``config`` carries
+    ``role_arn`` [+ optional ``session_policy``]) or ``db`` (``config`` carries
+    ``openbao_db_role``). ``role_arn`` is re-clamped by the mediator against an
+    IaC allowlist at mint time — declaring one here does not by itself grant it.
+    """
+
+    provider: str
+    config: dict[str, str] = field(default_factory=dict)
+    max_ttl_seconds: int = 0
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "CredScope":
+        return cls(
+            provider=_require_text(payload, "provider"),
+            config={str(k): str(v) for k, v in dict(payload.get("config") or {}).items()},
+            max_ttl_seconds=int(payload.get("max_ttl_seconds") or 0),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        body: dict[str, Any] = {"provider": self.provider, "config": dict(self.config)}
+        if self.max_ttl_seconds:
+            body["max_ttl_seconds"] = self.max_ttl_seconds
+        return body
+
+
 def _require_text(payload: Mapping[str, Any], field_name: str) -> str:
     value = payload.get(field_name)
     if not isinstance(value, str) or not value:
