@@ -60,6 +60,8 @@ from .exceptions import (
 )
 from . import _proxy
 from .models import (
+    Cred,
+    CredScope,
     ProxyResponse,
     ProxySession,
     ProxyTarget,
@@ -391,6 +393,38 @@ class AsyncSecrevoClient:
             "DELETE",
             _proxy.proxy_targets_path(self._workspace_id, secret.secret_id),
             params={"host": _require_text(host, "host")},
+        )
+
+    async def mint_creds(self, secret_name: str, *, ttl_seconds: int = 0) -> Cred:
+        """Async :meth:`SecrevoClient.mint_creds`."""
+        payload, _ = await self._request_json_with_headers(
+            "POST",
+            _proxy.creds_path(self._workspace_id, _require_text(secret_name, "secret_name")),
+            json_body={"ttl_seconds": int(ttl_seconds)},
+        )
+        return Cred.from_payload(payload)
+
+    async def get_cred_scope(self, secret_name: str) -> CredScope:
+        """Async :meth:`SecrevoClient.get_cred_scope`."""
+        secret = await self._resolve_secret_by_name(secret_name)
+        payload = await self._request_json("GET", _proxy.cred_scope_path(self._workspace_id, secret.secret_id))
+        return CredScope.from_payload(payload)
+
+    async def put_cred_scope(self, secret_name: str, scope: CredScope) -> CredScope:
+        """Async :meth:`SecrevoClient.put_cred_scope`."""
+        secret = await self._resolve_secret_by_name(secret_name)
+        payload, _ = await self._request_json_with_headers(
+            "PUT",
+            _proxy.cred_scope_path(self._workspace_id, secret.secret_id),
+            json_body=scope.to_payload(),
+        )
+        return CredScope.from_payload(payload)
+
+    async def remove_cred_scope(self, secret_name: str) -> None:
+        """Async :meth:`SecrevoClient.remove_cred_scope`."""
+        secret = await self._resolve_secret_by_name(secret_name)
+        await self._request_no_content(
+            "DELETE", _proxy.cred_scope_path(self._workspace_id, secret.secret_id)
         )
 
     # --- Internals -----------------------------------------------------------

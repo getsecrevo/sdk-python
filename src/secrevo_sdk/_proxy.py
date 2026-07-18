@@ -51,6 +51,14 @@ def proxy_targets_path(workspace_id: str, secret_id: str) -> str:
     return f"/v1/workspaces/{workspace_id}/secrets/{quote(secret_id, safe='')}/proxy-targets"
 
 
+def creds_path(workspace_id: str, name: str) -> str:
+    return f"/v1/workspaces/{workspace_id}/secrets/by-name/{quote(name, safe='')}/creds"
+
+
+def cred_scope_path(workspace_id: str, secret_id: str) -> str:
+    return f"/v1/workspaces/{workspace_id}/secrets/{quote(secret_id, safe='')}/cred-scope"
+
+
 def build_request_body(
     *,
     method: str,
