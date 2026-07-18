@@ -573,6 +573,19 @@ class SecrevoClient:
             "DELETE", _proxy.cred_scope_path(self._workspace_id, secret.secret_id)
         )
 
+    def set_agent_read(self, secret_name: str, allowed: bool) -> None:
+        """Allow (or deny) an AGENT to read this secret's raw value (human session;
+        secret.write). Default is deny; opt a secret in when the owner deems it
+        low-risk (public config, or a key already protected by MFA + scoped perms)
+        so their agent can read it — the deliberate per-secret exception to the
+        agent read-cut."""
+        secret = self._resolve_secret_by_name(secret_name)
+        self._request_json_with_headers(
+            "PUT",
+            _proxy.agent_read_path(self._workspace_id, secret.secret_id),
+            json_body={"allowed": bool(allowed)},
+        )
+
     # --- Internals -----------------------------------------------------------
 
     def _value_by_name_path(self, name: str) -> str:
