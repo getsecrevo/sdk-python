@@ -59,6 +59,10 @@ def cred_scope_path(workspace_id: str, secret_id: str) -> str:
     return f"/v1/workspaces/{workspace_id}/secrets/{quote(secret_id, safe='')}/cred-scope"
 
 
+def agent_read_path(workspace_id: str, secret_id: str) -> str:
+    return f"/v1/workspaces/{workspace_id}/secrets/{quote(secret_id, safe='')}/agent-read"
+
+
 def build_request_body(
     *,
     method: str,

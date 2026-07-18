@@ -427,6 +427,15 @@ class AsyncSecrevoClient:
             "DELETE", _proxy.cred_scope_path(self._workspace_id, secret.secret_id)
         )
 
+    async def set_agent_read(self, secret_name: str, allowed: bool) -> None:
+        """Async :meth:`SecrevoClient.set_agent_read`."""
+        secret = await self._resolve_secret_by_name(secret_name)
+        await self._request_json_with_headers(
+            "PUT",
+            _proxy.agent_read_path(self._workspace_id, secret.secret_id),
+            json_body={"allowed": bool(allowed)},
+        )
+
     # --- Internals -----------------------------------------------------------
 
     def _value_by_name_path(self, name: str) -> str:
