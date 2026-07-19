@@ -59,6 +59,88 @@ class SecrevoAPIError(SecrevoError):
         self.response_body = response_body
 
 
+class SecrevoMechanismError(SecrevoAPIError):
+    """Raised when the caller hits a *mechanism wall* — a deny point reached
+    while trying to USE a secret without seeing its plaintext (mediated
+    consumption not configured, no ephemeral-credential scope, ephemeral creds
+    disabled on the deployment, the agent raw-read cut, …).
+
+    Unlike a bare :class:`SecrevoAPIError`, it carries the api's actionable
+    envelope so a stuck agent (or its author) is never left at a dead-end:
+
+    - ``code``        — the stable machine code (e.g. ``mediated_not_configured``)
+    - ``remediation`` — the concrete next step AND the alternative
+    - ``retryable``   — ``False`` for a policy/config cut (do not retry)
+
+    The exception message leads with the code + message and appends the
+    remediation on its own line so it reads as the next action to take.
+    """
+
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        remediation: str,
+        retryable: bool = False,
+        status_code: int | None = None,
+        response_body: str | None = None,
+    ):
+        self.code = code
+        self.remediation = remediation
+        self.retryable = retryable
+        text = message or code or "the request was denied"
+        if code and code not in text:
+            text = f"{code}: {text}"
+        if remediation:
+            text = f"{text}\n  → {remediation}"
+        super().__init__(
+            text, status_code=status_code, response_body=response_body
+        )
+
+
+def api_error_from_body(
+    *,
+    status_code: int,
+    response_body: str | None,
+    fallback_message: str,
+) -> SecrevoAPIError:
+    """Build the right exception from a non-success response body.
+
+    When the body is the actionable envelope ``{error, message, remediation,
+    retryable}`` AND carries a remediation, return a rich
+    :class:`SecrevoMechanismError`; otherwise return a plain
+    :class:`SecrevoAPIError` with ``fallback_message`` (back-compat: the message
+    still embeds the status + raw body so existing substring checks keep working).
+    """
+    import json
+
+    body = response_body or ""
+    try:
+        envelope = json.loads(body)
+    except (ValueError, TypeError):
+        envelope = None
+    if isinstance(envelope, dict):
+        code = envelope.get("error") or ""
+        remediation = envelope.get("remediation") or ""
+        # Only a mechanism wall carries a remediation — that is the signal to
+        # raise the rich typed error. A plain coded error (forbidden, not_found,
+        # not_found_previous) stays a SecrevoAPIError so existing handling is
+        # untouched.
+        if code and remediation:
+            return SecrevoMechanismError(
+                code=code,
+                message=envelope.get("message") or "",
+                remediation=remediation,
+                retryable=bool(envelope.get("retryable", False)),
+                status_code=status_code,
+                response_body=body,
+            )
+    return SecrevoAPIError(
+        fallback_message, status_code=status_code, response_body=body
+    )
+
+
 class RateLimitedError(SecrevoAPIError):
     """Raised when the Secrevo API rate limits the caller (HTTP 429)."""
 

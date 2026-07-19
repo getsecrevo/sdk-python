@@ -18,6 +18,7 @@ from .exceptions import (
     SecrevoAPIError,
     SecrevoOfflineError,
     SecrevoPreviousValueNotFoundError,
+    api_error_from_body,
 )
 from .models import (
     Cred,
@@ -642,10 +643,10 @@ class SecrevoClient:
                     "the agent token used by the SDK has been paused or revoked. "
                     "Ask the workspace owner to mint a new token."
                 )
-        raise SecrevoAPIError(
-            self._format_error(response, method, path),
+        raise api_error_from_body(
             status_code=response.status_code,
             response_body=response.text,
+            fallback_message=self._format_error(response, method, path),
         )
 
     def _request_json_with_headers(
@@ -711,10 +712,10 @@ class SecrevoClient:
                     retry_after_seconds=retry_after,
                 )
 
-            raise SecrevoAPIError(
-                self._format_error(response, method, path),
+            raise api_error_from_body(
                 status_code=response.status_code,
                 response_body=response.text,
+                fallback_message=self._format_error(response, method, path),
             )
 
     def _compute_backoff(self, attempt: int, *, retry_after: float | None) -> float:

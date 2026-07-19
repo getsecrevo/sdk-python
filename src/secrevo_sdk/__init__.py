@@ -16,6 +16,7 @@ from .exceptions import (
     SecretNotFoundError,
     SecrevoAPIError,
     SecrevoError,
+    SecrevoMechanismError,
     SecrevoOfflineError,
     SecrevoPreviousValueNotFoundError,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "SecrevoAPIError",
     "SecrevoClient",
     "SecrevoError",
+    "SecrevoMechanismError",
     "SecrevoOfflineError",
     "SecrevoPreviousValueNotFoundError",
     "__version__",
