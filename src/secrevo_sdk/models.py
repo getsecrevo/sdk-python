@@ -215,10 +215,17 @@ class Cred:
 @dataclass(frozen=True, slots=True)
 class CredScope:
     """Per-secret declaration of what ephemeral credential it mints and its bounds
-    (F3, human-only to edit). ``provider`` is ``aws_sts`` (``config`` carries
-    ``role_arn`` [+ optional ``session_policy``]) or ``db`` (``config`` carries
-    ``openbao_db_role``). ``role_arn`` is re-clamped by the mediator against an
-    IaC allowlist at mint time — declaring one here does not by itself grant it.
+    (F3, human-only to edit). ``provider`` is one of:
+
+    - ``aws_federation`` (recommended, self-serve): mint short-lived AWS creds from
+      the secret's OWN stored key via STS GetFederationToken — no role, no allowlist.
+      ``config`` may carry ``access_key_id`` (only if the stored value is just the
+      secret key), ``region``, and ``policy`` (an inline IAM policy that can only
+      REDUCE the key's permissions). Empty ``policy`` → an ephemeral copy of the key.
+    - ``aws_sts``: assume an IaC-allowlisted IAM role (``config`` carries ``role_arn``
+      [+ optional ``session_policy``]); ``role_arn`` is re-clamped by the mediator
+      against an IaC allowlist at mint time — declaring one here does not grant it.
+    - ``db``: OpenBao database engine dynamic role (``config`` carries ``openbao_db_role``).
     """
 
     provider: str
