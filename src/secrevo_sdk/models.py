@@ -14,9 +14,20 @@ class SecretRecord:
     regeneration_instructions: str
     status: str
     updated_at: str
+    # Agent-usability introspection (Agent DX), present only on a single-secret
+    # GET (None on list results). Lets an agent discover HOW it may use this
+    # secret without seeing plaintext, so it never gets stuck in trial-and-error:
+    # usable_by_agent_via lists the mechanisms (mediated_http | ephemeral_aws |
+    # raw_read); the booleans say which are configured. Only WHETHER a mechanism
+    # exists is exposed — never the allowlist content.
+    agent_raw_read_allowed: bool | None = None
+    has_proxy_target: bool | None = None
+    has_cred_scope: bool | None = None
+    usable_by_agent_via: list[str] = field(default_factory=list)
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "SecretRecord":
+        via = payload.get("usable_by_agent_via")
         return cls(
             workspace_id=_require_text(payload, "workspace_id"),
             secret_id=_require_text(payload, "secret_id"),
@@ -27,6 +38,10 @@ class SecretRecord:
             ),
             status=_require_text(payload, "status"),
             updated_at=_require_text(payload, "updated_at"),
+            agent_raw_read_allowed=_optional_bool(payload, "agent_raw_read_allowed"),
+            has_proxy_target=_optional_bool(payload, "has_proxy_target"),
+            has_cred_scope=_optional_bool(payload, "has_cred_scope"),
+            usable_by_agent_via=[str(m) for m in via] if isinstance(via, list) else [],
         )
 
 
@@ -261,3 +276,12 @@ def _optional_text(payload: Mapping[str, Any], field_name: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"payload field '{field_name}' must be a string when present")
     return value
+
+
+def _optional_bool(payload: Mapping[str, Any], field_name: str) -> bool | None:
+    """Return a boolean field, or None when absent (e.g. the list endpoint omits
+    the agent-usability introspection flags — only the single GET carries them)."""
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    return bool(value)
