@@ -24,6 +24,11 @@ class SecretRecord:
     has_proxy_target: bool | None = None
     has_cred_scope: bool | None = None
     usable_by_agent_via: list[str] = field(default_factory=list)
+    # Present only on a single-secret GET AND only when nothing is configured for
+    # agent use (usable_by_agent_via empty): a human-readable hint naming the next
+    # commands a human can run to make this secret agent-usable without plaintext.
+    # A SEPARATE field from usable_by_agent_via; suppressed once a mechanism exists.
+    suggested_next_step: str | None = None
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "SecretRecord":
@@ -42,6 +47,9 @@ class SecretRecord:
             has_proxy_target=_optional_bool(payload, "has_proxy_target"),
             has_cred_scope=_optional_bool(payload, "has_cred_scope"),
             usable_by_agent_via=[str(m) for m in via] if isinstance(via, list) else [],
+            suggested_next_step=(
+                _optional_text(payload, "suggested_next_step") or None
+            ),
         )
 
 

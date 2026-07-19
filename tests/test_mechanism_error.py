@@ -113,6 +113,25 @@ def test_secret_record_surfaces_usability_flags() -> None:
     assert with_flags.has_proxy_target is True
     assert with_flags.has_cred_scope is False
     assert with_flags.usable_by_agent_via == ["mediated_http"]
+    assert with_flags.suggested_next_step is None  # a mechanism exists → no hint
+
+    fresh = SecretRecord.from_payload(
+        {
+            "workspace_id": "ws-1",
+            "secret_id": "sec-2",
+            "name": "FRESH",
+            "description": "",
+            "regeneration_instructions": "",
+            "status": "active",
+            "updated_at": "2026-07-19T00:00:00Z",
+            "has_proxy_target": False,
+            "has_cred_scope": False,
+            "suggested_next_step": "A human can run `secrevo secret proxy-target add` or `cred-scope add`.",
+        }
+    )
+    assert fresh.usable_by_agent_via == []
+    assert fresh.suggested_next_step is not None
+    assert "proxy-target add" in fresh.suggested_next_step
 
     from_list = SecretRecord.from_payload(
         {
