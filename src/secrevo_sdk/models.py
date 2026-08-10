@@ -29,10 +29,17 @@ class SecretRecord:
     # commands a human can run to make this secret agent-usable without plaintext.
     # A SEPARATE field from usable_by_agent_via; suppressed once a mechanism exists.
     suggested_next_step: str | None = None
+    # NAMES of the fields a multi-field secret's value is composed of — a login
+    # as {usuario, clave} rather than two unrelated secrets. Empty means the
+    # value is a scalar, which is every secret that predates the feature.
+    # Present only on a single-secret GET. Names only: the values stay behind
+    # reveal and the mediated mechanisms.
+    fields: list[str] = field(default_factory=list)
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "SecretRecord":
         via = payload.get("usable_by_agent_via")
+        names = payload.get("fields")
         return cls(
             workspace_id=_require_text(payload, "workspace_id"),
             secret_id=_require_text(payload, "secret_id"),
@@ -50,6 +57,7 @@ class SecretRecord:
             suggested_next_step=(
                 _optional_text(payload, "suggested_next_step") or None
             ),
+            fields=[str(f) for f in names] if isinstance(names, list) else [],
         )
 
 
@@ -77,6 +85,15 @@ class SecretValue:
     value: str
     degraded: bool = False
     grace_expires_at: datetime | None = None
+    #: For a multi-field secret, the whole bundle: every field name mapped to
+    #: its plaintext. ``value`` is then the empty string, because there is no
+    #: single value to return. For a scalar secret this is empty and ``value``
+    #: behaves exactly as it always has.
+    #:
+    #: The bundle arrives in ONE reveal rather than one call per field: the
+    #: reveal token is single-use, so fetching fields one at a time would burn
+    #: it on the first one.
+    fields: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_payload(
@@ -86,11 +103,43 @@ class SecretValue:
         *,
         grace_expires_at: datetime | None = None,
     ) -> "SecretValue":
+        raw_fields = payload.get("fields")
+        if isinstance(raw_fields, Mapping) and raw_fields:
+            # A multi-field secret carries no "value" key at all. Requiring one
+            # here would raise a misleading "missing value" error for a payload
+            # that is perfectly well-formed.
+            return cls(
+                secret=secret,
+                value="",
+                grace_expires_at=grace_expires_at,
+                fields={str(k): str(v) for k, v in raw_fields.items()},
+            )
         return cls(
             secret=secret,
             value=_require_text(payload, "value"),
             grace_expires_at=grace_expires_at,
         )
+
+    def field_value(self, name: str) -> str:
+        """Return one field of a multi-field secret.
+
+        Raises ``KeyError`` naming the fields that DO exist, so a typo is
+        self-diagnosing without printing any value. On a scalar secret it says
+        so rather than reporting a missing field that was never expected.
+        """
+        if not self.fields:
+            raise KeyError(
+                f"secret {self.secret.name!r} holds a single value, not named "
+                f"fields; use .value"
+            )
+        try:
+            return self.fields[name]
+        except KeyError:
+            available = ", ".join(sorted(self.fields))
+            raise KeyError(
+                f"secret {self.secret.name!r} has no field {name!r}; "
+                f"its fields are: {available}"
+            ) from None
 
 
 @dataclass(frozen=True, slots=True)
