@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import random
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal, Mapping
 from urllib.parse import quote
 
 import httpx
@@ -48,6 +48,8 @@ from .client import (
     _parse_retry_after,
     _require_env,
     _require_text,
+    _require_untrimmed,
+    _validated_fields,
     normalize_access_mode,
 )
 from .exceptions import (
@@ -437,6 +439,25 @@ class AsyncSecrevoClient:
             json_body={"allowed": bool(allowed)},
         )
 
+    async def set_value(self, secret_name: str, value: str) -> None:
+        """Async :meth:`SecrevoClient.set_value`."""
+        secret = await self._resolve_secret_by_name(secret_name)
+        await self._request_no_content(
+            "PUT",
+            _proxy.secret_value_path(self._workspace_id, secret.secret_id),
+            json_body={"value": _require_untrimmed(value, "value")},
+        )
+
+    async def set_fields(self, secret_name: str, fields: Mapping[str, str]) -> None:
+        """Async :meth:`SecrevoClient.set_fields` — the WHOLE bundle, always."""
+        secret = await self._resolve_secret_by_name(secret_name)
+        payload = _validated_fields(fields)
+        await self._request_no_content(
+            "PUT",
+            _proxy.secret_value_path(self._workspace_id, secret.secret_id),
+            json_body={"fields": payload},
+        )
+
     # --- Internals -----------------------------------------------------------
 
     def _value_by_name_path(self, name: str) -> str:
@@ -480,10 +501,18 @@ class AsyncSecrevoClient:
         return payload
 
     async def _request_no_content(
-        self, method: str, path: str, *, params: dict[str, str] | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
     ) -> None:
         """Issue a request whose success returns no JSON body (e.g. DELETE 204)."""
-        response = await self._client.request(method, path, params=params)
+        if json_body is not None:
+            response = await self._client.request(method, path, params=params, json=json_body)
+        else:
+            response = await self._client.request(method, path, params=params)
         if response.is_success:
             return
         if response.status_code in (401, 403):

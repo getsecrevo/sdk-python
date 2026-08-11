@@ -108,3 +108,7 @@ def resolve_typed(
         for k, v in dict(extra_headers).items():
             merged[str(k)] = str(v)
     return "https://" + p["host"] + path, merged
+
+
+def secret_value_path(workspace_id: str, secret_id: str) -> str:
+    return f"/v1/workspaces/{workspace_id}/secrets/{quote(secret_id, safe='')}/value"

@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import os
 import random
+import re
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
 from urllib.parse import quote
 
 import httpx
@@ -587,7 +588,77 @@ class SecrevoClient:
             json_body={"allowed": bool(allowed)},
         )
 
+    def set_value(self, secret_name: str, value: str) -> None:
+        """Rotate a secret to a new single value (``secret.write``).
+
+        Refused by the API with ``multi_field_secret`` if the secret stores
+        named fields. That is deliberate and not something to work around: the
+        vault replaces the whole map on write, so honouring a scalar write would
+        drop every sibling field silently. Use :meth:`set_fields` instead.
+        """
+        secret = self._resolve_secret_by_name(secret_name)
+        self._request_no_content(
+            "PUT",
+            _proxy.secret_value_path(self._workspace_id, secret.secret_id),
+            # NOT _require_text: that strips, and a secret value must never be
+            # altered on its way in. A password may legitimately begin or end
+            # with a space, and silently trimming one stores a credential that
+            # does not work and gives no hint why.
+            json_body={"value": _require_untrimmed(value, "value")},
+        )
+        self._invalidate_cached_secret(secret_name)
+
+    def set_fields(self, secret_name: str, fields: Mapping[str, str]) -> None:
+        """Write a multi-field secret — the WHOLE bundle, always (``secret.write``).
+
+        A multi-field secret is one credential made of several parts (a login as
+        ``usuario`` + ``clave``, a key pair as ``access_key_id`` +
+        ``secret_access_key``). Grouping them keeps every part on the protected
+        side of the permission boundary, instead of the half that "isn't the
+        password" ending up in the description, which is readable by anyone who
+        can list secrets.
+
+        **Send every field, every time.** There is no partial update: the vault
+        replaces the whole map, and the API cannot merge because it cannot read
+        the current value (the F4 read cut). A call that omits a field DELETES
+        it. Read the current field NAMES from ``SecretRecord.fields`` if you
+        need to check what a secret is composed of — the names are metadata; the
+        values require a reveal.
+
+        Field names must be lowercase snake_case (``^[a-z][a-z0-9_]{0,63}$``),
+        at most 32 per secret, with non-empty values. Values are NOT trimmed: a
+        password may legitimately begin or end with a space.
+
+        Converting a scalar secret that already feeds a configured mechanism is
+        refused with ``mechanism_configured`` unless the bundle carries what
+        that mechanism reads — the consumer would otherwise break at consume
+        time, on another host, long after this write.
+        """
+        secret = self._resolve_secret_by_name(secret_name)
+        payload = _validated_fields(fields)
+        self._request_no_content(
+            "PUT",
+            _proxy.secret_value_path(self._workspace_id, secret.secret_id),
+            json_body={"fields": payload},
+        )
+        self._invalidate_cached_secret(secret_name)
+
     # --- Internals -----------------------------------------------------------
+
+    def _invalidate_cached_secret(self, secret_name: str) -> None:
+        """Drop any cached value for a secret we just rotated.
+
+        Without this the offline/degraded fallback could serve the value this
+        very process just replaced — the one failure mode where a stale cache is
+        not a resilience feature but a wrong credential.
+        """
+        cache = self._cache
+        if cache is None:
+            return
+        try:
+            cache.invalidate(self._cache_key_for(secret_name))
+        except Exception:  # pragma: no cover - cache is best-effort by design
+            pass
 
     def _value_by_name_path(self, name: str) -> str:
         return (
@@ -630,10 +701,18 @@ class SecrevoClient:
         return payload
 
     def _request_no_content(
-        self, method: str, path: str, *, params: dict[str, str] | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
     ) -> None:
         """Issue a request whose success returns no JSON body (e.g. DELETE 204)."""
-        response = self._client.request(method, path, params=params)
+        if json_body is not None:
+            response = self._client.request(method, path, params=params, json=json_body)
+        else:
+            response = self._client.request(method, path, params=params)
         if response.is_success:
             return
         if response.status_code in (401, 403):
@@ -752,6 +831,59 @@ def _require_text(value: str, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string")
     return value.strip()
+
+
+def _require_untrimmed(value: str, field_name: str) -> str:
+    """Validate a SECRET VALUE without altering it.
+
+    The sibling above strips, which is right for a name and wrong for a
+    credential: a password may legitimately begin or end with a space, and
+    trimming one stores something that does not authenticate while looking
+    exactly like something that should.
+    """
+    if not isinstance(value, str) or value == "":
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value
+
+
+#: Field names are echoed into env var names, JSON keys and proxy placeholders,
+#: each with its own escaping rules, so the API keeps them boring. Mirrored here
+#: to fail on the caller's own machine with a message naming the offending
+#: field, instead of after a round trip.
+_FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_MAX_FIELDS = 32
+
+
+def _validated_fields(fields: Mapping[str, str]) -> dict[str, str]:
+    """Check a bundle client-side, then hand back a plain dict to send.
+
+    Deliberately does NOT normalise anything except rejecting: no trimming, no
+    lowercasing, no dropping of empties. A bundle is a credential, and the only
+    safe transformation of a credential is none.
+    """
+    if not isinstance(fields, Mapping) or not fields:
+        raise ValueError(
+            "fields must be a non-empty mapping of field name to value. "
+            "To store a single value, use set_value()."
+        )
+    if len(fields) > _MAX_FIELDS:
+        raise ValueError(
+            f"a secret may hold at most {_MAX_FIELDS} fields, got {len(fields)}. "
+            "Group only what shares a trust boundary — a bundle is one "
+            "credential, not a bag: grants are per secret, so every field a "
+            "bundle gains widens what one grant hands out."
+        )
+    out: dict[str, str] = {}
+    for name, value in fields.items():
+        if not isinstance(name, str) or not _FIELD_NAME_RE.match(name):
+            raise ValueError(
+                f"invalid field name {name!r}: use lowercase snake_case, "
+                "starting with a letter, max 64 chars (a-z, 0-9, _)"
+            )
+        if not isinstance(value, str) or value == "":
+            raise ValueError(f"field {name!r} must have a non-empty string value")
+        out[name] = value
+    return out
 
 
 def _require_env(name: str) -> str:
