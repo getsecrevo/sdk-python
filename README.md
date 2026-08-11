@@ -77,6 +77,55 @@ the API and lands as a `secret.value.read` audit event in the workspace.
 top of it. Treat the returned `value` as sensitive — pass it directly to
 the consumer and let it go out of scope.
 
+## Multi-field secrets (one credential, several parts)
+
+Plenty of real credentials are tuples: a SUNAT login is `ruc` + `usuario` +
+`clave`; a database is `host` + `port` + `user` + `password`. Storing them as
+one secret keeps **every** part on the protected side of the permission
+boundary, instead of the halves that "aren't the password" ending up in the
+description — which anyone who can list secrets can read.
+
+Reading:
+
+    record = secrevo.get("SUNAT_SOL")
+    print(record.fields)          # ['clave', 'ruc', 'usuario'] — NAMES only
+
+    revealed = secrevo.reveal_value("SUNAT_SOL")
+    revealed.field_value("clave") # the value of one field
+    revealed.value                # empty for a multi-field secret
+
+One reveal returns the whole bundle. That is deliberate: the reveal token is
+single-use, so fetching fields one at a time would burn it on the first half of
+a login.
+
+Writing — **send every field, every time**:
+
+    secrevo.set_fields("SUNAT_SOL", {
+        "ruc": "20600000001",
+        "usuario": "OPERADOR",
+        "clave": "…",
+    })
+
+There is no partial update. The vault replaces the whole map on write and the
+API cannot merge, because it cannot read the current value. **A call that omits
+a field deletes it.** Read `record.fields` first if you need to know what a
+secret is currently composed of.
+
+Field names are lowercase snake_case (`^[a-z][a-z0-9_]{0,63}$`), at most 32 per
+secret, values non-empty. The SDK checks all of that before the round trip and
+names the offending field. Values are never trimmed — a password may legitimately
+begin or end with a space.
+
+`set_value(name, value)` writes a single-value secret. It is refused with
+`multi_field_secret` against a secret that stores fields, rather than silently
+collapsing the bundle. Converting a scalar secret that already feeds a proxy
+target or a cred-scope is refused too, unless the bundle carries what that
+mechanism reads: the consumer would otherwise break at consume time, on another
+host, long after the write.
+
+Group only what shares a trust boundary. Grants are per secret, so every field a
+bundle gains widens what one grant hands out.
+
 ## Errors you actually want to handle
 
 The SDK distinguishes the failure modes that matter:
